@@ -1,7 +1,8 @@
 import jax
 import torch
-from transformers import MistralModel, MistralConfig, AutoTokenizer
 from _hf_mistral import MistralModel  # for debugging
+from transformers import AutoTokenizer, MistralConfig, MistralModel
+
 from mistral_jax import MistralModel as MistralModelJax
 from mistral_jax.utils import torch_to_jax_states
 
@@ -13,7 +14,13 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
     key = jax.random.PRNGKey(0)
     params = model_jax.init(key, inputs_jax["input_ids"])
     params = {**params, **torch_to_jax_states(model)}
-    outputs_jax = model_jax.apply(params, inputs_jax["input_ids"], attention_mask=inputs_jax["attention_mask"], mutable=["cache"], output_hidden_states=True)
+    outputs_jax = model_jax.apply(
+        params,
+        inputs_jax["input_ids"],
+        attention_mask=inputs_jax["attention_mask"],
+        mutable=["cache"],
+        output_hidden_states=True,
+    )
     return outputs, outputs_jax
 
 
@@ -39,8 +46,16 @@ def test_model():
         assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-3)
 
     # With attention mask
-    inputs = {**inputs, "attention_mask": torch.tensor([[1, 1, 1, 0, 0, 0, 0]], dtype=torch.int32)}
-    inputs_jax = {**inputs_jax, "attention_mask": jax.numpy.array([[1, 1, 1, 0, 0, 0, 0]], dtype=jax.numpy.int32)}
+    inputs = {
+        **inputs,
+        "attention_mask": torch.tensor([[1, 1, 1, 0, 0, 0, 0]], dtype=torch.int32),
+    }
+    inputs_jax = {
+        **inputs_jax,
+        "attention_mask": jax.numpy.array(
+            [[1, 1, 1, 0, 0, 0, 0]], dtype=jax.numpy.int32
+        ),
+    }
 
     outputs, outputs_jax = _forward_pass(model, model_jax, inputs, inputs_jax)
 

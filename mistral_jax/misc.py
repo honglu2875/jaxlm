@@ -7,9 +7,9 @@ def _get_causal_mask(qs, ks):
     return jnp.triu(jnp.ones((qs, ks), dtype=bool), ks - qs + 1)
 
 
-def _attn_fn(query, key, value,
-             past_position=0,
-             causal=True) -> tuple[jnp.ndarray, jnp.ndarray]:
+def _attn_fn(
+    query, key, value, past_position=0, causal=True
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     Eager implementation of attention. c.f. `attention_ref(...)` in
     `https://github.com/HazyResearch/flash-attention/blob/main/tests/test_flash_attn.py`.
@@ -23,19 +23,27 @@ def _attn_fn(query, key, value,
 
     key_len is normally the same as value_len, but could possibly larger than query_len (implementing kv cache).
     """
-    attn_weights = jnp.einsum('...shd,...thd->...hst', query / jnp.sqrt(query.shape[-1]), key)
+    attn_weights = jnp.einsum(
+        "...shd,...thd->...hst", query / jnp.sqrt(query.shape[-1]), key
+    )
     query_len = query.shape[-3]
     key_len = key.shape[-3]
-    attn_weights = jnp.where(causal,
-                             jnp.where(~_get_causal_mask(query.shape[-3], key.shape[-3]),
-                                       attn_weights,
-                                       float('-inf')),
-                             attn_weights)
-    mask = jnp.arange(0, key_len, dtype=jnp.int32) < (key_len - past_position - query_len)
+    attn_weights = jnp.where(
+        causal,
+        jnp.where(
+            ~_get_causal_mask(query.shape[-3], key.shape[-3]),
+            attn_weights,
+            float("-inf"),
+        ),
+        attn_weights,
+    )
+    mask = jnp.arange(0, key_len, dtype=jnp.int32) < (
+        key_len - past_position - query_len
+    )
     mask_shape = (1,) * (attn_weights.ndim - 1) + (-1,)
-    attn_weights = jnp.where(mask.reshape(mask_shape), float('-inf'), attn_weights)
+    attn_weights = jnp.where(mask.reshape(mask_shape), float("-inf"), attn_weights)
     attn_weights = jax.nn.softmax(attn_weights, axis=-1)
-    attn_output = jnp.einsum('...hst,...thd->...shd', attn_weights, value)
+    attn_output = jnp.einsum("...hst,...thd->...shd", attn_weights, value)
     return attn_output, attn_weights
 
 

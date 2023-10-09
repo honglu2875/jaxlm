@@ -1,13 +1,13 @@
-from functools import partial, lru_cache
-from typing import Optional, Tuple, List, Any
+from functools import lru_cache, partial
+from typing import Any, List, Optional, Tuple
 
 import chex
 import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-
 from flax.linen import partitioning as nn_partitioning
+
 from .activations import ACT2FN
 
 
@@ -39,10 +39,10 @@ def _get_unpad_data(padding_mask):
 
 @lru_cache(maxsize=32)
 def _make_sliding_window_causal_mask(
-        input_ids_shape: tuple,
-        dtype: jnp.dtype,
-        past_key_values_length: int = 0,
-        sliding_window: int = 4096,
+    input_ids_shape: tuple,
+    dtype: jnp.dtype,
+    past_key_values_length: int = 0,
+    sliding_window: int = 4096,
 ):
     """
     Make causal mask used for sliding window attention
@@ -60,14 +60,15 @@ def _make_sliding_window_causal_mask(
 
     if past_key_values_length > 0:
         mask = jnp.concatenate(
-            [jnp.zeros(tgt_len, past_key_values_length, dtype=dtype), mask],
-            dim=-1
+            [jnp.zeros(tgt_len, past_key_values_length, dtype=dtype), mask], dim=-1
         )
-    return jnp.broadcast_to(mask[None, None, :, :], (bsz, 1, tgt_len, tgt_len + past_key_values_length))
+    return jnp.broadcast_to(
+        mask[None, None, :, :], (bsz, 1, tgt_len, tgt_len + past_key_values_length)
+    )
 
 
 # Copied from transformers.models.bart.modeling_bart._expand_mask
-@partial(jax.jit, static_argnums=(1,), static_argnames=('tgt_len',))
+@partial(jax.jit, static_argnums=(1,), static_argnames=("tgt_len",))
 def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = None):
     """
     Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
@@ -75,7 +76,9 @@ def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = N
     bsz, src_len = mask.shape
     tgt_len = tgt_len if tgt_len is not None else src_len
 
-    expanded_mask = jnp.broadcast_to(mask[:, None, None, :], (bsz, 1, tgt_len, src_len)).astype(dtype)
+    expanded_mask = jnp.broadcast_to(
+        mask[:, None, None, :], (bsz, 1, tgt_len, src_len)
+    ).astype(dtype)
 
     return jnp.where(expanded_mask == 0, -jnp.inf, 0.0).astype(dtype)
 
@@ -92,7 +95,9 @@ class MistralRMSNorm(nn.Module):
         """
         MistralRMSNorm is equivalent to T5LayerNorm
         """
-        self.weight = self.param('weight', lambda rng, shape: jnp.ones(shape), (self.hidden_size,))
+        self.weight = self.param(
+            "weight", lambda rng, shape: jnp.ones(shape), (self.hidden_size,)
+        )
         self.variance_epsilon = self.eps
 
     def __call__(self, hidden_states):
@@ -109,15 +114,14 @@ class MistralRotaryEmbedding(nn.Module):
     base: int = 10000
 
     def setup(self):
-        self.inv_freq = self.variable("cache", "inv_freq",
-                                      lambda: 1.0 / (self.base **
-                                                     (jnp.arange(0, self.dim, 2,
-                                                                 dtype=jnp.float32) / self.dim)
-                                                     ))
-
-        self._set_cos_sin_cache(
-            seq_len=self.max_position_embeddings, dtype=jnp.float32
+        self.inv_freq = self.variable(
+            "cache",
+            "inv_freq",
+            lambda: 1.0
+            / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)),
         )
+
+        self._set_cos_sin_cache(seq_len=self.max_position_embeddings, dtype=jnp.float32)
 
     @nn.compact
     def _set_cos_sin_cache(self, seq_len, dtype):
@@ -128,8 +132,12 @@ class MistralRotaryEmbedding(nn.Module):
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = jnp.concatenate((freqs, freqs), axis=-1)
         is_initialized = self.has_variable("cache", "cos_cached")
-        self.cos_cached = self.variable('cache', 'cos_cached', lambda: jnp.cos(emb).astype(dtype))
-        self.sin_cached = self.variable('cache', 'sin_cached', lambda: jnp.sin(emb).astype(dtype))
+        self.cos_cached = self.variable(
+            "cache", "cos_cached", lambda: jnp.cos(emb).astype(dtype)
+        )
+        self.sin_cached = self.variable(
+            "cache", "sin_cached", lambda: jnp.sin(emb).astype(dtype)
+        )
         if is_initialized:
             self.cos_cached.value = jnp.cos(emb).astype(dtype)
             self.sin_cached.value = jnp.sin(emb).astype(dtype)
@@ -150,7 +158,7 @@ class MistralRotaryEmbedding(nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x2 = x[..., x.shape[-1] // 2 :]
     return jnp.concatenate((-x2, x1), axis=-1)
 
 
@@ -165,7 +173,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     return q_embed, k_embed
 
 
-@partial(jax.jit, static_argnames=('n_rep',))
+@partial(jax.jit, static_argnames=("n_rep",))
 def repeat_kv(hidden_states: jnp.ndarray, n_rep: int) -> jnp.ndarray:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -174,8 +182,10 @@ def repeat_kv(hidden_states: jnp.ndarray, n_rep: int) -> jnp.ndarray:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = jnp.broadcast_to(hidden_states[:, :, None, :, :],
-                                     (batch, num_key_value_heads, n_rep, slen, head_dim))
+    hidden_states = jnp.broadcast_to(
+        hidden_states[:, :, None, :, :],
+        (batch, num_key_value_heads, n_rep, slen, head_dim),
+    )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
@@ -195,8 +205,9 @@ class MistralMLP(nn.Module):
         self.act_fn = ACT2FN[self.config.hidden_act]
 
     def __call__(self, x, training=False):
-        assert x.shape[-1] == self.hidden_size, \
-            f"Input to MLP layers have different dimensions than the hidden dimension. Got {x.shape[-1]}"
+        assert (
+            x.shape[-1] == self.hidden_size
+        ), f"Input to MLP layers have different dimensions than the hidden dimension. Got {x.shape[-1]}"
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -204,6 +215,7 @@ class MistralAttention(nn.Module):
     """
     Flax implementation of attention.
     """
+
     config: Any = None
 
     def setup(self):
@@ -239,22 +251,23 @@ class MistralAttention(nn.Module):
     @jax.jit
     def _shape(self, tensor: jnp.ndarray, seq_len: int, bsz: int):
         return jnp.swapaxes(
-            tensor.reshape(bsz, seq_len, self.num_heads, self.head_dim),
-            1, 2
+            tensor.reshape(bsz, seq_len, self.num_heads, self.head_dim), 1, 2
         )
 
-    def __call__(self,
-                 hidden_states,
-                 attention_mask=None,
-                 position_ids=None,
-                 past_key_value=None,
-                 output_attentions=False,
-                 use_cache=False,
-                 padding_mask=None,
-                 training=False) \
-            -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[tuple]]:
-        assert hidden_states.shape[-1] == self.hidden_size, \
-            f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
+    def __call__(
+        self,
+        hidden_states,
+        attention_mask=None,
+        position_ids=None,
+        past_key_value=None,
+        output_attentions=False,
+        use_cache=False,
+        padding_mask=None,
+        training=False,
+    ) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[tuple]]:
+        assert (
+            hidden_states.shape[-1] == self.hidden_size
+        ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
 
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
 
@@ -262,24 +275,31 @@ class MistralAttention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
         query_states = jnp.swapaxes(
-            query_states.reshape(bsz, q_len, self.num_heads, self.head_dim),
-            1, 2
+            query_states.reshape(bsz, q_len, self.num_heads, self.head_dim), 1, 2
         )
         key_states = jnp.swapaxes(
             key_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim),
-            1, 2
+            1,
+            2,
         )
         value_states = jnp.swapaxes(
             value_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim),
-            1, 2
+            1,
+            2,
         )
 
-        kv_seq_len = key_states.shape[-2] + (past_key_value[0].shape[-2] if past_key_value is not None else 0)
+        kv_seq_len = key_states.shape[-2] + (
+            past_key_value[0].shape[-2] if past_key_value is not None else 0
+        )
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
 
         if past_key_value is not None:
-            assert len(past_key_value) == 2, 'past_key_value should be a tuple of (k, v)'
+            assert (
+                len(past_key_value) == 2
+            ), "past_key_value should be a tuple of (k, v)"
             past_key, past_value = past_key_value
             key_states = jnp.concatenate([past_key, key_states], axis=2)
             value_states = jnp.concatenate([past_value, value_states], axis=2)
@@ -290,7 +310,9 @@ class MistralAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = (query_states @ jnp.swapaxes(key_states, 2, 3)) / jnp.sqrt(self.head_dim)
+        attn_weights = (query_states @ jnp.swapaxes(key_states, 2, 3)) / jnp.sqrt(
+            self.head_dim
+        )
 
         _check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
@@ -321,18 +343,22 @@ class MistralDecoderLayer(nn.Module):
         self.hidden_size = self.config.hidden_size
         self.self_attn = MistralAttention(config=self.config)
         self.mlp = MistralMLP(self.config)
-        self.input_layernorm = MistralRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
-        self.post_attention_layernorm = MistralRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.input_layernorm = MistralRMSNorm(
+            self.config.hidden_size, eps=self.config.rms_norm_eps
+        )
+        self.post_attention_layernorm = MistralRMSNorm(
+            self.config.hidden_size, eps=self.config.rms_norm_eps
+        )
 
     def __call__(
-            self,
-            hidden_states: jnp.ndarray,
-            attention_mask: Optional[jnp.ndarray] = None,
-            position_ids: Optional[jnp.ndarray] = None,
-            past_key_value: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
-            output_attentions: Optional[bool] = False,
-            use_cache: Optional[bool] = False,
-            padding_mask: Optional[jnp.ndarray] = None,
+        self,
+        hidden_states: jnp.ndarray,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        past_key_value: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        padding_mask: Optional[jnp.ndarray] = None,
     ) -> Tuple:
         """
         Args:
@@ -384,15 +410,27 @@ class MistralModel(nn.Module):
         self.padding_idx = self.config.pad_token_id
         self.vocab_size = self.config.vocab_size
 
-        self.embed_tokens = nn.Embed(self.config.vocab_size, self.config.hidden_size, self.padding_idx)
-        self.layers = [MistralDecoderLayer(self.config) for _ in range(self.config.num_hidden_layers)]
-        self.norm = MistralRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.embed_tokens = nn.Embed(
+            self.config.vocab_size, self.config.hidden_size, self.padding_idx
+        )
+        self.layers = [
+            MistralDecoderLayer(self.config)
+            for _ in range(self.config.num_hidden_layers)
+        ]
+        self.norm = MistralRMSNorm(
+            self.config.hidden_size, eps=self.config.rms_norm_eps
+        )
         # self.embed_tokens = self.variable('cache', 'embed_tokens', lambda rng, shape: jnp.zeros(shape))
 
         self.gradient_checkpointing = False
 
     def _prepare_decoder_attention_mask(
-            self, attention_mask, input_shape, inputs_embeds, past_key_values_length, sliding_window
+        self,
+        attention_mask,
+        input_shape,
+        inputs_embeds,
+        past_key_values_length,
+        sliding_window,
     ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -407,26 +445,36 @@ class MistralModel(nn.Module):
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+            )
             combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
+                expanded_attn_mask
+                if combined_attention_mask is None
+                else expanded_attn_mask + combined_attention_mask
             )
 
         return combined_attention_mask
 
     def __call__(
-            self,
-            input_ids,
-            attention_mask: Optional[jnp.ndarray] = None,
-            position_ids: Optional[jnp.ndarray] = None,
-            past_key_values: Optional[List[jnp.ndarray]] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
+        self,
+        input_ids,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        past_key_values: Optional[List[jnp.ndarray]] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
     ) -> BaseModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
@@ -440,17 +488,20 @@ class MistralModel(nn.Module):
             seq_length_with_past = seq_length_with_past + past_key_values_length
 
         if position_ids is None:
-            position_ids = jnp.expand_dims(jnp.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=jnp.int32
-            ), 0)
+            position_ids = jnp.expand_dims(
+                jnp.arange(
+                    past_key_values_length,
+                    seq_length + past_key_values_length,
+                    dtype=jnp.int32,
+                ),
+                0,
+            )
 
         padding_mask = None
 
         # embed positions
         if attention_mask is None:
-            attention_mask = jnp.ones(
-                (batch_size, seq_length_with_past), dtype=bool
-            )
+            attention_mask = jnp.ones((batch_size, seq_length_with_past), dtype=bool)
         elif not jnp.all(attention_mask):
             padding_mask = attention_mask
 
@@ -474,7 +525,9 @@ class MistralModel(nn.Module):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
 
             layer_outputs = decoder_layer(
                 hidden_states,
