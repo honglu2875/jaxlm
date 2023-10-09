@@ -1,20 +1,14 @@
 from functools import partial, lru_cache
-from typing import Optional, Tuple, Union, List, Any
+from typing import Optional, Tuple, List, Any
 
+import chex
 import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-from jax import lax
 from flax.linen import partitioning as nn_partitioning
-import chex
 from .activations import ACT2FN
-
-
-# TODO:
-#  1. attn_mask,
-#  2. different attn_impl
 
 
 @flax.struct.dataclass
@@ -26,11 +20,7 @@ class BaseModelOutputWithPast:
 
 
 def _check_shape(tensor, *shape):
-    if tensor.shape != shape:
-        raise ValueError(
-            f"`{tensor.__name__}` should be of size {shape}, but is"
-            f" {tensor.shape}"
-        )
+    chex.assert_shape(tensor, shape)
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -87,7 +77,7 @@ def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = N
 
     expanded_mask = jnp.broadcast_to(mask[:, None, None, :], (bsz, 1, tgt_len, src_len)).astype(dtype)
 
-    return jnp.where(expanded_mask == 0, -jnp.inf, 1.0).astype(dtype)
+    return jnp.where(expanded_mask == 0, -jnp.inf, 0.0).astype(dtype)
 
 
 param_with_axes = nn_partitioning.param_with_axes
@@ -461,7 +451,7 @@ class MistralModel(nn.Module):
             attention_mask = jnp.ones(
                 (batch_size, seq_length_with_past), dtype=bool
             )
-        elif 0 in attention_mask:
+        elif not jnp.all(attention_mask):
             padding_mask = attention_mask
 
         inputs_embeds = self.embed_tokens(input_ids)
