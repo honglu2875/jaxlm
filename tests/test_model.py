@@ -18,7 +18,7 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
         params,
         inputs_jax["input_ids"],
         attention_mask=inputs_jax["attention_mask"],
-        mutable=["cache"],
+        mutable=("cache",),
         output_hidden_states=True,
     )
     return outputs, outputs_jax
@@ -35,6 +35,7 @@ def test_model():
     )
     model = MistralModel(config)
     model_jax = MistralModelJax(config)
+    model_jax.apply = jax.jit(model_jax.apply, static_argnames=["mutable", "output_hidden_states"])
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
     inputs_jax = tokenizer("Hello, my dog is cute", return_tensors="jax")
 

@@ -502,7 +502,7 @@ class MistralModel(nn.Module):
         # embed positions
         if attention_mask is None:
             attention_mask = jnp.ones((batch_size, seq_length_with_past), dtype=bool)
-        elif not jnp.all(attention_mask):
+        else:
             padding_mask = attention_mask
 
         inputs_embeds = self.embed_tokens(input_ids)
