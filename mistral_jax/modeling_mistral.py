@@ -71,7 +71,7 @@ def _get_unpad_data(padding_mask):
     )
 
 
-@lru_cache(maxsize=32)
+@partial(jax.jit, static_argnames=("input_ids_shape", "dtype", "past_key_values_length", "sliding_window"))
 def _make_sliding_window_causal_mask(
     input_ids_shape: tuple,
     dtype: jnp.dtype,
@@ -94,7 +94,7 @@ def _make_sliding_window_causal_mask(
 
     if past_key_values_length > 0:
         mask = jnp.concatenate(
-            [jnp.zeros(tgt_len, past_key_values_length, dtype=dtype), mask], dim=-1
+            [jnp.zeros((tgt_len, past_key_values_length), dtype=dtype), mask], axis=-1
         )
     return jnp.broadcast_to(
         mask[None, None, :, :], (bsz, 1, tgt_len, tgt_len + past_key_values_length)
@@ -114,7 +114,7 @@ def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = N
         mask[:, None, None, :], (bsz, 1, tgt_len, src_len)
     ).astype(dtype)
 
-    return jnp.where(expanded_mask == 0, -jnp.inf, 0.0).astype(dtype)
+    return jnp.where(expanded_mask == 0, jnp.finfo(dtype).min, 0.0).astype(dtype)
 
 
 param_with_axes = nn_partitioning.param_with_axes
@@ -179,7 +179,7 @@ class MistralRotaryEmbedding(nn.Module):
     def __call__(self, x: jnp.ndarray, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len=seq_len, dtype=x.dtype)
+            self._set_cos_sin_cache(seq_len=seq_len, dtype=jnp.float32)
 
         return (
             self.cos_cached.value[:seq_len].astype(x.dtype),
@@ -249,7 +249,6 @@ class MistralAttention(nn.Module):
     """
     Flax implementation of attention.
     """
-
     config: Any = None
 
     def setup(self):
@@ -354,7 +353,7 @@ class MistralAttention(nn.Module):
             _check_shape(attention_mask, bsz, 1, q_len, kv_seq_len)
             attn_weights = attn_weights + attention_mask
 
-        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(hidden_states.dtype)
         attn_output = attn_weights @ value_states
 
         _check_shape(attn_output, bsz, self.num_heads, q_len, self.head_dim)
@@ -366,7 +365,6 @@ class MistralAttention(nn.Module):
 
         if not output_attentions:
             attn_weights = None
-
         return attn_output, attn_weights, past_key_value
 
 
@@ -454,12 +452,9 @@ class MistralModel(nn.Module):
         self.norm = MistralRMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
-        # self.embed_tokens = self.variable('cache', 'embed_tokens', lambda rng, shape: jnp.zeros(shape))
 
-        self.gradient_checkpointing = False
-
+    @staticmethod
     def _prepare_decoder_attention_mask(
-        self,
         attention_mask,
         input_shape,
         inputs_embeds,
@@ -468,27 +463,19 @@ class MistralModel(nn.Module):
     ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = _make_sliding_window_causal_mask(
-                input_shape,
-                inputs_embeds.dtype,
-                past_key_values_length=past_key_values_length,
-                sliding_window=sliding_window,
-            )
+        combined_attention_mask = _make_sliding_window_causal_mask(
+            input_shape,
+            inputs_embeds.dtype,
+            past_key_values_length=past_key_values_length,
+            sliding_window=sliding_window,
+        )
 
-        if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(
-                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
-            )
-            combined_attention_mask = (
-                expanded_attn_mask
-                if combined_attention_mask is None
-                else expanded_attn_mask + combined_attention_mask
-            )
+        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+        expanded_attn_mask = _expand_mask(
+            attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+        )
 
-        return combined_attention_mask
+        return expanded_attn_mask + combined_attention_mask
 
     def __call__(
         self,
@@ -588,7 +575,6 @@ class MistralModel(nn.Module):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
-
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,

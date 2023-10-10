@@ -18,10 +18,17 @@ import jax.numpy as jnp
 import torch
 
 
-def torch_to_jax_states(input: torch.nn.Module | dict):
+def torch_to_jax_states(input: torch.nn.Module | dict, dtype: str | torch.dtype = "bf16"):
     """
     Converts the states of a PyTorch model to JAX states.
     """
+    _to_jnp_dtype = {
+        torch.float16: jnp.float16,
+        torch.float32: jnp.float32,
+        torch.float64: jnp.float64,
+        'bf16': jnp.bfloat16,
+    }
+
     if isinstance(input, torch.nn.Module):
         states = input.state_dict()
     elif isinstance(input, dict):
@@ -55,9 +62,9 @@ def torch_to_jax_states(input: torch.nn.Module | dict):
 
         if split[-1] in _key_map:
             split[-1], func = _key_map[split[-1]]
-            val = func(v.numpy())
+            val = func(v.numpy().astype(_to_jnp_dtype[dtype]))
         else:
-            val = v.numpy()
+            val = v.numpy().astype(_to_jnp_dtype[dtype])
 
         _dict = jax_states["params"]
         for i, l in enumerate(split):

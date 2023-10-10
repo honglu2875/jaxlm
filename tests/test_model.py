@@ -29,7 +29,8 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
 
     key = jax.random.PRNGKey(0)
     params = model_jax.init(key, inputs_jax["input_ids"])
-    params = {**params, **torch_to_jax_states(model)}
+    params.pop("params")
+    params.update(torch_to_jax_states(model, dtype=torch.float32))
     outputs_jax = model_jax.apply(
         params,
         inputs_jax["input_ids"],
@@ -40,7 +41,7 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
     return outputs, outputs_jax, params
 
 
-def _setup_models(model_cls, model_cls_jax):
+def _setup_models(model_cls, model_cls_jax, jit=True):
     tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
     config = MistralConfig(
         hidden_size=64,
@@ -48,12 +49,14 @@ def _setup_models(model_cls, model_cls_jax):
         num_attention_heads=4,
         num_hidden_layers=2,
         num_key_value_heads=2,
+        sliding_window=3,
     )
     model = model_cls(config)
     model_jax = model_cls_jax(config)
-    model_jax.apply = jax.jit(
-        model_jax.apply, static_argnames=["mutable", "output_hidden_states", "use_cache"]
-    )
+    if jit:
+        model_jax.apply = jax.jit(
+            model_jax.apply, static_argnames=["mutable", "output_hidden_states", "use_cache"]
+        )
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
     inputs_jax = tokenizer("Hello, my dog is cute", return_tensors="jax")
     return tokenizer, model, model_jax, inputs, inputs_jax
@@ -61,13 +64,14 @@ def _setup_models(model_cls, model_cls_jax):
 
 def test_model():
     tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
-        MistralModel, MistralModelJax
+        MistralModel, MistralModelJax, jit=True
     )
     outputs, outputs_jax, _ = _forward_pass(model, model_jax, inputs, inputs_jax)
 
     for i in range(len(outputs.hidden_states)):
         hidden = outputs.hidden_states[i].numpy()
         hidden_jax = outputs_jax[0].hidden_states[i]
+        print(jnp.max(jnp.abs(hidden - hidden_jax)))
         assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-3)
 
     # With attention mask
@@ -88,6 +92,7 @@ def test_model():
     for i in range(len(outputs.hidden_states)):
         hidden = outputs.hidden_states[i].numpy()
         hidden_jax = outputs_jax[0].hidden_states[i]
+        print(jnp.max(jnp.abs(hidden - hidden_jax)))
         assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-3)
 
 
