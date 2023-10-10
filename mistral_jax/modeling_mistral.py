@@ -1,3 +1,28 @@
+# coding=utf-8
+# Copyright 2023 Honglu Fan (https://github.com/honglu2875).
+#
+# This code is based on Hugging Face Mistral model code whose authors are
+# denoted below. But it has been largely modified into JAX and Flax frameworks.
+#
+# Copyright 2023 Mistral AI and the HuggingFace Inc. team. All rights reserved.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in this library. It has been modified from its
+# original forms to accommodate minor architectural differences compared
+# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from functools import lru_cache, partial
 from typing import Any, List, Optional, Tuple
 
@@ -9,14 +34,23 @@ import jax.numpy as jnp
 from flax.linen import partitioning as nn_partitioning
 
 from .activations import ACT2FN
+from ._generate import generate
 
 
 @flax.struct.dataclass
 class BaseModelOutputWithPast:
     last_hidden_state: jnp.ndarray
-    past_key_values: Optional[Tuple[jnp.ndarray]] = None
-    hidden_states: Optional[Tuple[jnp.ndarray]] = None
-    attentions: Optional[Tuple[jnp.ndarray]] = None
+    past_key_values: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
+    attentions: Optional[Tuple[jnp.ndarray, ...]] = None
+
+
+@flax.struct.dataclass
+class CausalLMOutputWithPast:
+    logits: jnp.ndarray
+    past_key_values: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
+    attentions: Optional[Tuple[jnp.ndarray, ...]] = None
 
 
 def _check_shape(tensor, *shape):
@@ -560,4 +594,71 @@ class MistralModel(nn.Module):
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+        )
+
+
+class MistralForCausalLM(nn.Module):
+    config: Any = None
+
+    def setup(self):
+        self.model = MistralModel(self.config)
+        self.lm_head = nn.Dense(self.config.vocab_size, use_bias=False)
+
+    def __call__(
+        self,
+        input_ids,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        past_key_values: Optional[List[jnp.ndarray]] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+    ) -> CausalLMOutputWithPast:
+        outputs = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        logits = self.lm_head(outputs.last_hidden_state)
+        return CausalLMOutputWithPast(
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    def generate(
+        self,
+        params,
+        prompt_tokens: list | jnp.ndarray,
+        seed: int = 0,
+        max_len: int = 100,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        temp: float = 1.0,
+    ):
+        def apply_fn(params, tok, attention_mask=None, past_key_values=None, use_cache=True):
+            out = self.apply(
+                params,
+                jnp.array(tok),
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                mutable=("cache",),
+            )[0]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
+            return out.logits, out.past_key_values
+
+        return generate(
+            params,
+            apply_fn,
+            prompt_tokens,
+            seed=seed,
+            max_len=max_len,
+            top_k=top_k,
+            top_p=top_p,
+            temp=temp,
         )

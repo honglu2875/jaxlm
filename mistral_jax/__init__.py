@@ -1,1 +1,1 @@
-from .modeling_mistral import MistralModel
+from .modeling_mistral import MistralModel, MistralForCausalLM

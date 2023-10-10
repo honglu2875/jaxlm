@@ -1,9 +1,24 @@
+# coding=utf-8
+# Copyright 2023 Honglu Fan (https://github.com/honglu2875).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import jax
 import torch
-from _hf_mistral import MistralModel  # for debugging
-from transformers import AutoTokenizer, MistralConfig, MistralModel
+from transformers import AutoTokenizer, MistralConfig, MistralModel, MistralForCausalLM
 
 from mistral_jax import MistralModel as MistralModelJax
+from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
 from mistral_jax.utils import torch_to_jax_states
 
 
@@ -21,10 +36,10 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
         mutable=("cache",),
         output_hidden_states=True,
     )
-    return outputs, outputs_jax
+    return outputs, outputs_jax, params
 
 
-def test_model():
+def _setup_models(model_cls, model_cls_jax):
     tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
     config = MistralConfig(
         hidden_size=64,
@@ -33,13 +48,21 @@ def test_model():
         num_hidden_layers=2,
         num_key_value_heads=2,
     )
-    model = MistralModel(config)
-    model_jax = MistralModelJax(config)
-    model_jax.apply = jax.jit(model_jax.apply, static_argnames=["mutable", "output_hidden_states"])
+    model = model_cls(config)
+    model_jax = model_cls_jax(config)
+    model_jax.apply = jax.jit(
+        model_jax.apply, static_argnames=["mutable", "output_hidden_states", "use_cache"]
+    )
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
     inputs_jax = tokenizer("Hello, my dog is cute", return_tensors="jax")
+    return tokenizer, model, model_jax, inputs, inputs_jax
 
-    outputs, outputs_jax = _forward_pass(model, model_jax, inputs, inputs_jax)
+
+def test_model():
+    tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
+        MistralModel, MistralModelJax
+    )
+    outputs, outputs_jax, _ = _forward_pass(model, model_jax, inputs, inputs_jax)
 
     for i in range(len(outputs.hidden_states)):
         hidden = outputs.hidden_states[i].numpy()
@@ -54,13 +77,26 @@ def test_model():
     inputs_jax = {
         **inputs_jax,
         "attention_mask": jax.numpy.array(
-            [[1, 1, 1, 0, 0, 0, 0]], dtype=jax.numpy.int32
+            [[1, 1, 1, 0, 0, 0, 0]],
+            dtype=jax.numpy.int32,
         ),
     }
 
-    outputs, outputs_jax = _forward_pass(model, model_jax, inputs, inputs_jax)
+    outputs, outputs_jax, _ = _forward_pass(model, model_jax, inputs, inputs_jax)
 
     for i in range(len(outputs.hidden_states)):
         hidden = outputs.hidden_states[i].numpy()
         hidden_jax = outputs_jax[0].hidden_states[i]
         assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-3)
+
+
+def test_generate():
+    tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
+        MistralForCausalLM, MistralForCausalLMJax
+    )
+    outputs, outputs_jax, params = _forward_pass(model, model_jax, inputs, inputs_jax)
+
+    assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-3)
+
+    out = model_jax.generate(params, inputs_jax["input_ids"])
+    print(out)

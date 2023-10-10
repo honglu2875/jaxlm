@@ -1,3 +1,18 @@
+# coding=utf-8
+# Copyright 2023 Honglu Fan (https://github.com/honglu2875).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import jax
 import jax.numpy as jnp
 import torch
@@ -28,25 +43,25 @@ def torch_to_jax_states(input: torch.nn.Module | dict):
                 "Not implemented for bias conversion as Mistral does not use bias."
             )
         split = k.split(".")
-        if len(split) > 1 and split[1].isdigit():
-            levels = [split[0] + "_" + split[1], *split[2:]]
-        else:
-            levels = split
+        for i, s in enumerate(split):
+            if s.isdigit():
+                split[i - 1] += "_" + s
+                split.pop(i)
 
-        if levels[-2] in _exclude_keys:
+        if split[-2] in _exclude_keys:
             _key_map = {}
         else:
-            _key_map = _emb_key_map if levels[0] == "embed_tokens" else _dense_key_map
+            _key_map = _emb_key_map if "embed_tokens" in split else _dense_key_map
 
-        if levels[-1] in _key_map:
-            levels[-1], func = _key_map[levels[-1]]
+        if split[-1] in _key_map:
+            split[-1], func = _key_map[split[-1]]
             val = func(v.numpy())
         else:
             val = v.numpy()
 
         _dict = jax_states["params"]
-        for i, l in enumerate(levels):
-            _dict[l] = _dict.setdefault(l, {} if i < len(levels) - 1 else val)
+        for i, l in enumerate(split):
+            _dict[l] = _dict.setdefault(l, {} if i < len(split) - 1 else val)
             _dict = _dict[l]
 
     return jax_states
