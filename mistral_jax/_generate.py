@@ -78,6 +78,7 @@ def generate(
     params,
     eval_fn,
     prompt_tokens: list | jnp.ndarray,
+    do_sample: bool = True,
     seed: int = 0,
     max_len: int = 100,
     top_k: int = 0,
@@ -90,6 +91,7 @@ def generate(
         params: FrozenDict containing the model parameters
         eval_fn: the evaluation function (usually the `model.apply` or `jax.jit(model.apply)`)
         prompt_tokens: the tokenized prompt
+        do_sample: whether to sample the distribution or take the argmax
         seed: random seed
         max_len: the max generation length
         top_k: top k
@@ -120,8 +122,11 @@ def generate(
         )
 
         logits = outputs[:, -1:] * 1.0 / temp
-        logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
-        out_tk = jax.random.categorical(subkey, logits)
+        if do_sample:
+            logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+            out_tk = jax.random.categorical(subkey, logits)
+        else:
+            out_tk = jnp.argmax(logits, axis=-1)
 
         current_state = jnp.concatenate((current_state, out_tk), axis=-1)
 

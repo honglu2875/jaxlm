@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import jax
+import jax.numpy as jnp
 import torch
 from transformers import AutoTokenizer, MistralConfig, MistralModel, MistralForCausalLM
 
@@ -98,5 +99,12 @@ def test_generate():
 
     assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-3)
 
-    out = model_jax.generate(params, inputs_jax["input_ids"])
-    print(out)
+    # make sure do_sample works (but no ground truth to compare to)
+    out_jax = model_jax.generate(params, inputs_jax["input_ids"], do_sample=True, max_length=10)
+
+    # compare do_sample=False with reference impl
+    with torch.no_grad():
+        out = model.generate(inputs["input_ids"], do_sample=False, max_new_tokens=10)
+    out_jax = model_jax.generate(params, inputs_jax["input_ids"], do_sample=False, max_length=10)
+
+    assert jnp.all(out.numpy() == out_jax)
