@@ -1,2 +1,3 @@
 jax
 jaxlib
+t5x @ https://github.com/google-research/t5x
