@@ -37,6 +37,16 @@ from t5x.examples.t5 import layers
 from .activations import ACT2FN
 from ._generate import generate
 
+"""
+Notes:
+It uses t5x.examples.t5.layers so that it is compatible with the t5 library. But it defines logical named axis
+and operates sharding in a different fashion than the flax official way of using `nn.with_logical_partitioning`...
+Although I hate doing this I am throwing in both. So now this abomination mixes both ways. Putting this note
+out there to say that it's not my fault of this code. For any serious use, this needs a lot of refactoring
+but I have already cleaned up some mess from the insane Hugging Face `modeling_mistral.py` imeplementation and
+hopefully things are not too difficult from here.
+"""
+
 
 @flax.struct.dataclass
 class BaseModelOutputWithPast:
@@ -130,8 +140,12 @@ class MistralRMSNorm(nn.Module):
         """
         MistralRMSNorm is equivalent to T5LayerNorm
         """
-        self.weight = self.param(
-            "weight", lambda rng, shape: jnp.ones(shape), (self.hidden_size,)
+        self.weight = param_with_axes(
+            "weight",
+            nn.with_logical_partitioning(lambda _, shape, dtype: jnp.ones(shape, dtype=dtype), ("embed",)),
+            (self.hidden_size,),
+            jnp.float32,
+            axes=("embed",),
         )
         self.variance_epsilon = self.eps
 
@@ -152,8 +166,7 @@ class MistralRotaryEmbedding(nn.Module):
         self.inv_freq = self.variable(
             "cache",
             "inv_freq",
-            lambda: 1.0
-                    / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)),
+            lambda: 1.0 / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)),
         )
 
         self._set_cos_sin_cache(seq_len=self.max_position_embeddings, dtype=jnp.float32)
@@ -237,18 +250,21 @@ class MistralMLP(nn.Module):
         # input dim supposed to be self.hidden_size
         self.gate_proj = layers.DenseGeneral(self.intermediate_size,
                                              dtype=self.dtype,
-                                             kernel_init=self.kernel_init,
-                                             kernel_axes=('embed', 'intermediate'),
+                                             kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                                                      ('embed', 'intermediate')),
+                                             kernel_axes=('intermediate', 'embed'),
                                              name="gate_proj")
         self.up_proj = layers.DenseGeneral(self.intermediate_size,
                                            dtype=self.dtype,
-                                           kernel_init=self.kernel_init,
+                                           kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                                                    ('intermediate', 'up_sample')),
                                            kernel_axes=('intermediate', 'up_sample'),
                                            name="up_proj")
         # input dim supposed to be self.intermediate_size
         self.down_proj = layers.DenseGeneral(self.hidden_size,
                                              dtype=self.dtype,
-                                             kernel_init=self.kernel_init,
+                                             kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                                                      ('up_sample', 'embed')),
                                              kernel_axes=('up_sample', 'embed'),
                                              name="down_proj")
         self.act_fn = ACT2FN[self.config.hidden_act]
@@ -289,29 +305,33 @@ class MistralAttention(nn.Module):
         self.q_proj = layers.DenseGeneral(
             self.num_heads * self.head_dim,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('embed', 'q'),
+            kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                     ('embed', 'joined_kv')),
+            kernel_axes=('embed', 'joined_kv'),
             name="q_proj",
         )
         self.k_proj = layers.DenseGeneral(
             self.num_key_value_heads * self.head_dim,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('embed', 'k'),
+            kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                     ('embed', 'joined_kv')),
+            kernel_axes=('embed', 'joined_kv'),
             name="k_proj",
         )
         self.v_proj = layers.DenseGeneral(
             self.num_key_value_heads * self.head_dim,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('embed', 'v'),
+            kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                     ('embed', 'joined_kv')),
+            kernel_axes=('embed', 'joined_kv'),
             name="v_proj",
         )
         self.o_proj = layers.DenseGeneral(
             self.hidden_size,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('hidden', 'embed'),
+            kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                     ('joined_kv', 'embed')),
+            kernel_axes=('joined_kv', 'embed'),
             name="o_proj",
         )
 
@@ -361,13 +381,13 @@ class MistralAttention(nn.Module):
             2,
         )
         query_states = with_sharding_constraint(
-            query_states, ("batch", "heads", "length", "head_dim")
+            query_states, ("batch", "heads", "length", "kv")
         )
         key_states = with_sharding_constraint(
-            key_states, ("batch", "kv_heads", "length", "head_dim")
+            key_states, ("batch", "heads", "kv_length", "kv")
         )
         value_states = with_sharding_constraint(
-            value_states, ("batch", "kv_heads", "length", "head_dim")
+            value_states, ("batch", "heads", "kv_length", "kv")
         )
 
         kv_seq_len = key_states.shape[-2] + (
@@ -393,10 +413,10 @@ class MistralAttention(nn.Module):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         key_states = with_sharding_constraint(
-            key_states, ("batch", "heads", "kv_length", "head_dim")
+            key_states, ("batch", "heads", "kv_length", "kv")
         )
         value_states = with_sharding_constraint(
-            value_states, ("batch", "heads", "kv_length", "head_dim")
+            value_states, ("batch", "heads", "kv_length", "kv")
         )
 
         attn_weights = (query_states @ jnp.swapaxes(key_states, 2, 3)) / jnp.sqrt(
@@ -506,7 +526,8 @@ class MistralModel(nn.Module):
             num_embeddings=self.vocab_size,
             features=self.config.hidden_size,
             attend_dtype=self.dtype,
-            embedding_init=nn.initializers.normal(stddev=1.0),
+            embedding_init=nn.with_logical_partitioning(nn.initializers.normal(stddev=1.0),
+                                                        ('vocab', 'embed',)),
             one_hot=True,
             name="embed_tokens",
         )
@@ -600,7 +621,7 @@ class MistralModel(nn.Module):
             sliding_window=self.config.sliding_window,
         )
 
-        hidden_states = inputs_embeds
+        hidden_states = with_sharding_constraint(inputs_embeds, ("batch", "length", "embed"))
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -658,11 +679,11 @@ class MistralForCausalLM(nn.Module):
         self.lm_head = layers.DenseGeneral(
             self.config.vocab_size,
             dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=('embed', 'logits'),
+            kernel_init=nn.with_logical_partitioning(self.kernel_init,
+                                                     ('embed', 'vocab')),
+            kernel_axes=('embed', 'vocab'),
             name="lm_head",
         )
-
 
     def __call__(
             self,

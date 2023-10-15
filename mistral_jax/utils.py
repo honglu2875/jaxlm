@@ -15,7 +15,11 @@
 
 import jax
 import jax.numpy as jnp
+from flax.linen.partitioning import AxisMetadata
+from flax.core.frozen_dict import freeze
+from flax.traverse_util import flatten_dict, unflatten_dict
 import torch
+import re
 
 
 def torch_to_jax_states(input: torch.nn.Module | dict, dtype: str | torch.dtype = "bf16"):
