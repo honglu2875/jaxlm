@@ -16,10 +16,11 @@
 import jax
 import jax.numpy as jnp
 import torch
-from transformers import AutoTokenizer, MistralConfig, MistralModel, MistralForCausalLM
+from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
+                          MistralModel)
 
-from mistral_jax import MistralModel as MistralModelJax
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
+from mistral_jax import MistralModel as MistralModelJax
 from mistral_jax.utils import torch_to_jax_states
 
 
@@ -55,7 +56,8 @@ def _setup_models(model_cls, model_cls_jax, jit=True):
     model_jax = model_cls_jax(config)
     if jit:
         model_jax.apply = jax.jit(
-            model_jax.apply, static_argnames=["mutable", "output_hidden_states", "use_cache"]
+            model_jax.apply,
+            static_argnames=["mutable", "output_hidden_states", "use_cache"],
         )
     inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
     inputs_jax = tokenizer("Hello, my dog is cute", return_tensors="jax")
@@ -105,11 +107,15 @@ def test_generate():
     assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-3)
 
     # make sure do_sample works (but no ground truth to compare to)
-    out_jax = model_jax.generate(params, inputs_jax["input_ids"], do_sample=True, max_length=10)
+    out_jax = model_jax.generate(
+        params, inputs_jax["input_ids"], do_sample=True, max_length=10
+    )
 
     # compare do_sample=False with reference impl
     with torch.no_grad():
         out = model.generate(inputs["input_ids"], do_sample=False, max_new_tokens=10)
-    out_jax = model_jax.generate(params, inputs_jax["input_ids"], do_sample=False, max_length=10)
+    out_jax = model_jax.generate(
+        params, inputs_jax["input_ids"], do_sample=False, max_length=10
+    )
 
     assert jnp.all(out.numpy() == out_jax)

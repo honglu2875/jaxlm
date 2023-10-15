@@ -23,7 +23,9 @@ import jax.numpy as jnp
 def top_k_filtering(logits, top_k=32, filter_value=-float("Inf")):
     # Remove all tokens with a probability less than the last token of the top-k
     sorted_indices = jnp.argsort(-logits)
-    k_th_value = jnp.take_along_axis(logits, sorted_indices[..., top_k - 1][..., None], axis=-1).squeeze(-1)
+    k_th_value = jnp.take_along_axis(
+        logits, sorted_indices[..., top_k - 1][..., None], axis=-1
+    ).squeeze(-1)
     logits = jnp.where(logits < k_th_value[..., None], filter_value, logits)
 
     return logits

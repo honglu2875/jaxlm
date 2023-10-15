@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax
-import jax.numpy as jnp
-from flax.linen.partitioning import AxisMetadata
-from flax.core.frozen_dict import freeze
-from flax.traverse_util import flatten_dict, unflatten_dict
-import torch
 import re
 
+import jax
+import jax.numpy as jnp
+import torch
+from flax.core.frozen_dict import freeze
+from flax.linen.partitioning import AxisMetadata
+from flax.traverse_util import flatten_dict, unflatten_dict
 
-def torch_to_jax_states(input: torch.nn.Module | dict, dtype: str | torch.dtype = "bf16"):
+
+def torch_to_jax_states(
+    input: torch.nn.Module | dict, dtype: str | torch.dtype = "bf16"
+):
     """
     Converts the states of a PyTorch model to JAX states.
     """
@@ -30,7 +33,7 @@ def torch_to_jax_states(input: torch.nn.Module | dict, dtype: str | torch.dtype 
         torch.float16: jnp.float16,
         torch.float32: jnp.float32,
         torch.float64: jnp.float64,
-        'bf16': jnp.bfloat16,
+        "bf16": jnp.bfloat16,
     }
 
     if isinstance(input, torch.nn.Module):

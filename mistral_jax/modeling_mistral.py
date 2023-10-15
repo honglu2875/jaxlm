@@ -2,7 +2,8 @@
 # Copyright 2023 Honglu Fan (https://github.com/honglu2875).
 #
 # This code is based on Hugging Face Mistral model code whose authors are
-# denoted below. But it has been largely modified into JAX and Flax frameworks.
+# denoted below. But it has been largely modified for JAX, Flax, and t5x.
+# Original copyright message below:
 #
 # Copyright 2023 Mistral AI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -23,7 +24,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any, List, Optional, Tuple
 
 import chex
@@ -34,16 +35,16 @@ import jax.numpy as jnp
 from flax.linen import partitioning as nn_partitioning
 from t5x.examples.t5 import layers
 
-from .activations import ACT2FN
 from ._generate import generate
+from .activations import ACT2FN
 
 """
 Notes:
-It uses t5x.examples.t5.layers so that it is compatible with the t5 library. But it defines logical named axis
+It uses t5x.examples.t5.layers so that it is compatible with the t5 library. But t5x defines logical named axis
 and operates sharding in a different fashion than the flax official way of using `nn.with_logical_partitioning`...
-Although I hate doing this I am throwing in both. So now this abomination mixes both ways. Putting this note
-out there to say that it's not my fault of this code. For any serious use, this needs a lot of refactoring
-but I have already cleaned up some mess from the insane Hugging Face `modeling_mistral.py` imeplementation and
+Although I hate doing this I am mixing both ways. 
+Putting this note out there to say that it's not my fault for this code. For any serious use, this needs a lot 
+of refactoring. I have already cleaned up some mess from the insane Hugging Face `modeling_mistral.py` and
 hopefully things are not too difficult from here.
 """
 
@@ -82,12 +83,20 @@ def _get_unpad_data(padding_mask):
     )
 
 
-@partial(jax.jit, static_argnames=("input_ids_shape", "dtype", "past_key_values_length", "sliding_window"))
+@partial(
+    jax.jit,
+    static_argnames=(
+        "input_ids_shape",
+        "dtype",
+        "past_key_values_length",
+        "sliding_window",
+    ),
+)
 def _make_sliding_window_causal_mask(
-        input_ids_shape: tuple,
-        dtype: jnp.dtype,
-        past_key_values_length: int = 0,
-        sliding_window: int = 4096,
+    input_ids_shape: tuple,
+    dtype: jnp.dtype,
+    past_key_values_length: int = 0,
+    sliding_window: int = 4096,
 ):
     """
     Make causal mask used for sliding window attention
@@ -142,7 +151,9 @@ class MistralRMSNorm(nn.Module):
         """
         self.weight = param_with_axes(
             "weight",
-            nn.with_logical_partitioning(lambda _, shape, dtype: jnp.ones(shape, dtype=dtype), ("embed",)),
+            nn.with_logical_partitioning(
+                lambda _, shape, dtype: jnp.ones(shape, dtype=dtype), ("embed",)
+            ),
             (self.hidden_size,),
             jnp.float32,
             axes=("embed",),
@@ -166,7 +177,8 @@ class MistralRotaryEmbedding(nn.Module):
         self.inv_freq = self.variable(
             "cache",
             "inv_freq",
-            lambda: 1.0 / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)),
+            lambda: 1.0
+            / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)),
         )
 
         self._set_cos_sin_cache(seq_len=self.max_position_embeddings, dtype=jnp.float32)
@@ -206,7 +218,7 @@ class MistralRotaryEmbedding(nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x2 = x[..., x.shape[-1] // 2 :]
     return jnp.concatenate((-x2, x1), axis=-1)
 
 
@@ -248,30 +260,39 @@ class MistralMLP(nn.Module):
         self.hidden_size = self.config.hidden_size
         self.intermediate_size = self.config.intermediate_size
         # input dim supposed to be self.hidden_size
-        self.gate_proj = layers.DenseGeneral(self.intermediate_size,
-                                             dtype=self.dtype,
-                                             kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                                                      ('embed', 'intermediate')),
-                                             kernel_axes=('intermediate', 'embed'),
-                                             name="gate_proj")
-        self.up_proj = layers.DenseGeneral(self.intermediate_size,
-                                           dtype=self.dtype,
-                                           kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                                                    ('intermediate', 'up_sample')),
-                                           kernel_axes=('intermediate', 'up_sample'),
-                                           name="up_proj")
+        self.gate_proj = layers.DenseGeneral(
+            self.intermediate_size,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "intermediate")
+            ),
+            kernel_axes=("intermediate", "embed"),
+            name="gate_proj",
+        )
+        self.up_proj = layers.DenseGeneral(
+            self.intermediate_size,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("intermediate", "up_sample")
+            ),
+            kernel_axes=("intermediate", "up_sample"),
+            name="up_proj",
+        )
         # input dim supposed to be self.intermediate_size
-        self.down_proj = layers.DenseGeneral(self.hidden_size,
-                                             dtype=self.dtype,
-                                             kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                                                      ('up_sample', 'embed')),
-                                             kernel_axes=('up_sample', 'embed'),
-                                             name="down_proj")
+        self.down_proj = layers.DenseGeneral(
+            self.hidden_size,
+            dtype=self.dtype,
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("up_sample", "embed")
+            ),
+            kernel_axes=("up_sample", "embed"),
+            name="down_proj",
+        )
         self.act_fn = ACT2FN[self.config.hidden_act]
 
     def __call__(self, x, training=False):
         assert (
-                x.shape[-1] == self.hidden_size
+            x.shape[-1] == self.hidden_size
         ), f"Input to MLP layers have different dimensions than the hidden dimension. Got {x.shape[-1]}"
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
@@ -280,6 +301,7 @@ class MistralAttention(nn.Module):
     """
     Flax implementation of attention.
     """
+
     config: Any = None
     dtype: Any = jnp.float32
     kernel_init: Any = nn.initializers.xavier_uniform()
@@ -305,33 +327,37 @@ class MistralAttention(nn.Module):
         self.q_proj = layers.DenseGeneral(
             self.num_heads * self.head_dim,
             dtype=self.dtype,
-            kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                     ('embed', 'joined_kv')),
-            kernel_axes=('embed', 'joined_kv'),
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "joined_kv")
+            ),
+            kernel_axes=("embed", "joined_kv"),
             name="q_proj",
         )
         self.k_proj = layers.DenseGeneral(
             self.num_key_value_heads * self.head_dim,
             dtype=self.dtype,
-            kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                     ('embed', 'joined_kv')),
-            kernel_axes=('embed', 'joined_kv'),
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "joined_kv")
+            ),
+            kernel_axes=("embed", "joined_kv"),
             name="k_proj",
         )
         self.v_proj = layers.DenseGeneral(
             self.num_key_value_heads * self.head_dim,
             dtype=self.dtype,
-            kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                     ('embed', 'joined_kv')),
-            kernel_axes=('embed', 'joined_kv'),
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "joined_kv")
+            ),
+            kernel_axes=("embed", "joined_kv"),
             name="v_proj",
         )
         self.o_proj = layers.DenseGeneral(
             self.hidden_size,
             dtype=self.dtype,
-            kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                     ('joined_kv', 'embed')),
-            kernel_axes=('joined_kv', 'embed'),
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("joined_kv", "embed")
+            ),
+            kernel_axes=("joined_kv", "embed"),
             name="o_proj",
         )
 
@@ -348,18 +374,18 @@ class MistralAttention(nn.Module):
         )
 
     def __call__(
-            self,
-            hidden_states,
-            attention_mask=None,
-            position_ids=None,
-            past_key_value=None,
-            output_attentions=False,
-            use_cache=False,
-            padding_mask=None,
-            training=False,
+        self,
+        hidden_states,
+        attention_mask=None,
+        position_ids=None,
+        past_key_value=None,
+        output_attentions=False,
+        use_cache=False,
+        padding_mask=None,
+        training=False,
     ) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[tuple]]:
         assert (
-                hidden_states.shape[-1] == self.hidden_size
+            hidden_states.shape[-1] == self.hidden_size
         ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
 
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
@@ -400,7 +426,7 @@ class MistralAttention(nn.Module):
 
         if past_key_value is not None:
             assert (
-                    len(past_key_value) == 2
+                len(past_key_value) == 2
             ), "past_key_value should be a tuple of (k, v)"
             past_key, past_value = past_key_value
             key_states = jnp.concatenate([past_key, key_states], axis=2)
@@ -429,7 +455,9 @@ class MistralAttention(nn.Module):
             _check_shape(attention_mask, bsz, 1, q_len, kv_seq_len)
             attn_weights = attn_weights + attention_mask
 
-        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(hidden_states.dtype)
+        attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(
+            hidden_states.dtype
+        )
         attn_output = attn_weights @ value_states
 
         _check_shape(attn_output, bsz, self.num_heads, q_len, self.head_dim)
@@ -451,8 +479,12 @@ class MistralDecoderLayer(nn.Module):
 
     def setup(self):
         self.hidden_size = self.config.hidden_size
-        self.self_attn = MistralAttention(config=self.config, dtype=self.dtype, kernel_init=self.kernel_init)
-        self.mlp = MistralMLP(config=self.config, dtype=self.dtype, kernel_init=self.kernel_init)
+        self.self_attn = MistralAttention(
+            config=self.config, dtype=self.dtype, kernel_init=self.kernel_init
+        )
+        self.mlp = MistralMLP(
+            config=self.config, dtype=self.dtype, kernel_init=self.kernel_init
+        )
         self.input_layernorm = MistralRMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
@@ -461,14 +493,14 @@ class MistralDecoderLayer(nn.Module):
         )
 
     def __call__(
-            self,
-            hidden_states: jnp.ndarray,
-            attention_mask: Optional[jnp.ndarray] = None,
-            position_ids: Optional[jnp.ndarray] = None,
-            past_key_value: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
-            output_attentions: Optional[bool] = False,
-            use_cache: Optional[bool] = False,
-            padding_mask: Optional[jnp.ndarray] = None,
+        self,
+        hidden_states: jnp.ndarray,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        past_key_value: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = False,
+        padding_mask: Optional[jnp.ndarray] = None,
     ) -> Tuple:
         """
         Args:
@@ -526,13 +558,20 @@ class MistralModel(nn.Module):
             num_embeddings=self.vocab_size,
             features=self.config.hidden_size,
             attend_dtype=self.dtype,
-            embedding_init=nn.with_logical_partitioning(nn.initializers.normal(stddev=1.0),
-                                                        ('vocab', 'embed',)),
+            embedding_init=nn.with_logical_partitioning(
+                nn.initializers.normal(stddev=1.0),
+                (
+                    "vocab",
+                    "embed",
+                ),
+            ),
             one_hot=True,
             name="embed_tokens",
         )
         self.layers = [
-            MistralDecoderLayer(self.config, dtype=self.dtype, kernel_init=self.kernel_init)
+            MistralDecoderLayer(
+                self.config, dtype=self.dtype, kernel_init=self.kernel_init
+            )
             for _ in range(self.config.num_hidden_layers)
         ]
         self.norm = MistralRMSNorm(
@@ -541,11 +580,11 @@ class MistralModel(nn.Module):
 
     @staticmethod
     def _prepare_decoder_attention_mask(
-            attention_mask,
-            input_shape,
-            inputs_embeds,
-            past_key_values_length,
-            sliding_window,
+        attention_mask,
+        input_shape,
+        inputs_embeds,
+        past_key_values_length,
+        sliding_window,
     ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -564,14 +603,14 @@ class MistralModel(nn.Module):
         return expanded_attn_mask + combined_attention_mask
 
     def __call__(
-            self,
-            input_ids,
-            attention_mask: Optional[jnp.ndarray] = None,
-            position_ids: Optional[jnp.ndarray] = None,
-            past_key_values: Optional[List[jnp.ndarray]] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
+        self,
+        input_ids,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        past_key_values: Optional[List[jnp.ndarray]] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
     ) -> BaseModelOutputWithPast:
         output_attentions = (
             output_attentions
@@ -621,7 +660,9 @@ class MistralModel(nn.Module):
             sliding_window=self.config.sliding_window,
         )
 
-        hidden_states = with_sharding_constraint(inputs_embeds, ("batch", "length", "embed"))
+        hidden_states = with_sharding_constraint(
+            inputs_embeds, ("batch", "length", "embed")
+        )
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -675,25 +716,28 @@ class MistralForCausalLM(nn.Module):
     kernel_init: Any = nn.initializers.xavier_uniform()
 
     def setup(self):
-        self.model = MistralModel(self.config, dtype=self.dtype, kernel_init=self.kernel_init)
+        self.model = MistralModel(
+            self.config, dtype=self.dtype, kernel_init=self.kernel_init
+        )
         self.lm_head = layers.DenseGeneral(
             self.config.vocab_size,
             dtype=self.dtype,
-            kernel_init=nn.with_logical_partitioning(self.kernel_init,
-                                                     ('embed', 'vocab')),
-            kernel_axes=('embed', 'vocab'),
+            kernel_init=nn.with_logical_partitioning(
+                self.kernel_init, ("embed", "vocab")
+            ),
+            kernel_axes=("embed", "vocab"),
             name="lm_head",
         )
 
     def __call__(
-            self,
-            input_ids,
-            attention_mask: Optional[jnp.ndarray] = None,
-            position_ids: Optional[jnp.ndarray] = None,
-            past_key_values: Optional[List[jnp.ndarray]] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
+        self,
+        input_ids,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        past_key_values: Optional[List[jnp.ndarray]] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
     ) -> CausalLMOutputWithPast:
         outputs = self.model(
             input_ids,
@@ -713,17 +757,19 @@ class MistralForCausalLM(nn.Module):
         )
 
     def generate(
-            self,
-            params,
-            prompt_tokens: list | jnp.ndarray,
-            do_sample: bool = True,
-            seed: int = 0,
-            max_length: int = 10,
-            top_k: int = 0,
-            top_p: float = 0.0,
-            temp: float = 1.0,
+        self,
+        params,
+        prompt_tokens: list | jnp.ndarray,
+        do_sample: bool = True,
+        seed: int = 0,
+        max_length: int = 10,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        temp: float = 1.0,
     ):
-        def apply_fn(params, tok, attention_mask=None, past_key_values=None, use_cache=True):
+        def apply_fn(
+            params, tok, attention_mask=None, past_key_values=None, use_cache=True
+        ):
             out = self.apply(
                 params,
                 jnp.array(tok),
@@ -731,7 +777,9 @@ class MistralForCausalLM(nn.Module):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 mutable=("cache",),
-            )[0]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
+            )[
+                0
+            ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
             return out.logits, out.past_key_values
 
         return generate(
