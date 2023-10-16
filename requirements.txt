@@ -1,3 +1,5 @@
 jax
 jaxlib
+flax
+orbax
 t5x @ https://github.com/google-research/t5x

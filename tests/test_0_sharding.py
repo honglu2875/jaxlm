@@ -14,11 +14,14 @@
 # limitations under the License.
 import functools
 import os
+import pathlib
+import shutil
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
 import flax.linen as nn
 import jax
+import jax.numpy as jnp
 import torch
 from flax.linen import partitioning as nn_partitioning
 from jax.experimental import mesh_utils
@@ -27,7 +30,7 @@ from t5x import partitioning
 from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM
 
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
-from mistral_jax.utils import torch_to_jax_states
+from mistral_jax.utils import torch_to_jax_states, save, load
 
 device_mesh = mesh_utils.create_device_mesh((2, 4))
 mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
@@ -164,3 +167,30 @@ def test_sharded_gen():
     params = model_jax.get_params()
     output = model_jax.generate(params, inputs, do_sample=True, max_length=10)
     print(output)
+
+
+def test_save_load():
+    config = MistralConfig(
+        hidden_size=128,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        sliding_window=3,
+    )
+    model_jax = MistralForCausalLMJax(config)
+    params = model_jax.get_params()
+
+    abs_path = pathlib.Path(__file__).parent.absolute()
+    if os.path.exists(str(abs_path) + '/tmp'):
+        shutil.rmtree(str(abs_path) + '/tmp')
+
+    save(params, str(abs_path) + '/tmp/')
+    p = load(str(abs_path) + '/tmp/', item=params)
+    print(params)
+    print(p)
+    assert jax.tree_util.tree_all(
+        jax.tree_map(lambda x, y: jnp.all(x == y), params, p)
+    )
+    if os.path.exists(str(abs_path) + '/tmp'):
+        shutil.rmtree(str(abs_path) + '/tmp')

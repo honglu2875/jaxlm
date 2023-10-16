@@ -15,6 +15,7 @@
 
 import jax.numpy as jnp
 import torch
+import orbax
 
 
 def torch_to_jax_states(
@@ -73,3 +74,13 @@ def torch_to_jax_states(
             _dict = _dict[l]
 
     return jax_states
+
+
+def save(params, path='tmp/'):
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    orbax_checkpointer.save(path, params)
+
+
+def load(path='tmp/', item=None):
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    return orbax_checkpointer.restore(path, item=item)
