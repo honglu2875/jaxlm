@@ -720,12 +720,6 @@ class MistralForCausalLM(nn.Module):
     kernel_init: Any = nn.initializers.xavier_uniform()
 
     sharded: Optional[bool] = len(jax.devices()) > 1 and len(jax.devices()) % 2 == 0
-    device_mesh: Optional[np.ndarray] = (
-        mesh_utils.create_device_mesh((2, len(jax.devices()) // 2)) if sharded else None
-    )
-    mesh: Optional[Mesh] = (
-        Mesh(devices=device_mesh, axis_names=("data", "model")) if sharded else None
-    )
 
     @staticmethod
     def mesh_sharding(pspec: PartitionSpec | None, mesh: Mesh | None) -> NamedSharding:
@@ -733,11 +727,45 @@ class MistralForCausalLM(nn.Module):
             mesh = Mesh(jax.devices(), (None,))
         return NamedSharding(mesh, pspec)
 
-    def get_params(self, weights=None):
+    @staticmethod
+    def _parse_mesh_layout(device_mesh_layout):
+        assert isinstance(device_mesh_layout, (list, tuple)), f"device_mesh_layout must be a list or tuple. " \
+                                                              f"Got {type(device_mesh_layout)}"
+        assert len(device_mesh_layout) == 2, f"The length of device_mesh_layout must be 2. " \
+                                             f"Got {len(device_mesh_layout)}"
+        mesh_layout = []
+        for i in range(2):
+            if device_mesh_layout[i] is None:
+                assert device_mesh_layout[1 - i] is not None, f"Invalid device_mesh_layout. Got {device_mesh_layout}."
+                mesh_layout.append(len(jax.devices()) // device_mesh_layout[1 - i])
+            else:
+                mesh_layout.append(device_mesh_layout[i])
+
+        return tuple(mesh_layout)
+
+    def get_params(self, device_mesh_layout=(1, None), weights=None):
+        """
+        Get the properly sharded parameters.
+        Args:
+            device_mesh_layout: the device mesh layout. For example:
+                (1, None) means data=1, model=len(jax.devices())
+                (2, None) means data=2, model=len(jax.devices()) // 2
+                (None, 2) means data=len(jax.devices()) // 2, model=2
+            weights: whether a tree of weights are already given (but may not be sharded)
+        Returns:
+            a tree of properly sharded parameters
+        """
         key = jax.random.PRNGKey(0)
-        dummy_input = jnp.array([[1, 1], [1, 1]])
+
+        mesh_layout = self._parse_mesh_layout(device_mesh_layout)
+
+        dummy_input = jnp.array([[1 for _ in range(mesh_layout[1])] for _ in range(mesh_layout[0])])
+
         abstract_variables = jax.eval_shape(self.init, key, dummy_input)
         if self.sharded:
+            mesh = Mesh(devices=mesh_utils.create_device_mesh(mesh_layout),
+                        axis_names=("data", "model"))
+
             rules = t5x_partitioning.standard_logical_axis_rules(
                 activation_partitioning_dims=1,
                 parameter_partitioning_dims=1,
@@ -749,24 +777,28 @@ class MistralForCausalLM(nn.Module):
             )
             logical_state_spec = nn.get_partition_spec(abstract_variables)
             logical_state_sharding = nn.logical_to_mesh_sharding(
-                logical_state_spec, self.mesh, rules
+                logical_state_spec, mesh, rules
             )
 
             x_sharding = self.mesh_sharding(
-                PartitionSpec("data", None), self.mesh
+                PartitionSpec("data", None), mesh
             )  # dimensions: (batch, length)
 
             params = jax.jit(
                 self.init,
                 in_shardings=(
-                    self.mesh_sharding(None, self.mesh),
+                    self.mesh_sharding(None, mesh),
                     x_sharding,
                 ),  # PRNG key and x
                 out_shardings=logical_state_sharding,
             )(key, dummy_input)
         else:
             params = self.init(key, dummy_input)
+            logical_state_sharding = None
 
+        # If a given set of weights exists, remove the "params" key of `params` and
+        # replace with a properly sharded weight. Other keys (such as "cache") of
+        # `params` are kept.
         if weights is not None:
             assert isinstance(
                 weights, dict
@@ -774,6 +806,7 @@ class MistralForCausalLM(nn.Module):
             assert (
                 "params" in weights
             ), f"The key params not found in 'weights'. Got {weights.keys()}"
+
             if self.sharded:
                 params.update(
                     {
@@ -789,10 +822,12 @@ class MistralForCausalLM(nn.Module):
 
         return params
 
-    def prepare_input(self, inputs):
+    def prepare_input(self, inputs, device_mesh_layout=(1, None)):
         if self.sharded:
+            mesh = Mesh(devices=mesh_utils.create_device_mesh(self._parse_mesh_layout(device_mesh_layout)),
+                        axis_names=("data", "model"))
             inputs = jax.device_put(
-                inputs, self.mesh_sharding(PartitionSpec("data", None), self.mesh)
+                inputs, self.mesh_sharding(PartitionSpec("data", None), mesh)
             )
         return inputs
 
