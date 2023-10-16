@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import jax.numpy as jnp
+import numpy as np
 import orbax
 import torch
 
@@ -24,11 +25,11 @@ def torch_to_jax_states(
     """
     Converts the states of a PyTorch model to JAX states.
     """
-    _to_jnp_dtype = {
-        torch.float16: jnp.float16,
-        torch.float32: jnp.float32,
-        torch.float64: jnp.float64,
-        "bf16": jnp.bfloat16,
+    _to_np_dtype = {
+        torch.float16: np.float16,
+        torch.float32: np.float32,
+        torch.float64: np.float64,
+        "bf16": np.bfloat16,
     }
 
     if isinstance(input, torch.nn.Module):
@@ -64,9 +65,9 @@ def torch_to_jax_states(
 
         if split[-1] in _key_map:
             split[-1], func = _key_map[split[-1]]
-            val = func(v.numpy().astype(_to_jnp_dtype[dtype]))
+            val = func(v.numpy().astype(_to_np_dtype[dtype]))
         else:
-            val = v.numpy().astype(_to_jnp_dtype[dtype])
+            val = v.numpy().astype(_to_np_dtype[dtype])
 
         _dict = jax_states["params"]
         for i, l in enumerate(split):

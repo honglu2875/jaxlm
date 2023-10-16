@@ -818,6 +818,7 @@ class MistralForCausalLM(nn.Module):
             ), f"The key params not found in 'weights'. Got {weights.keys()}"
 
             if self.sharded:
+                params.pop("params")  # remove the "params" key to save vRAM
                 params.update(
                     {
                         "params": jax.jit(
