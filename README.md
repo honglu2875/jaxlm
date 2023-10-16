@@ -23,22 +23,13 @@ inputs = tokenizer("Hello, my dog is cute", return_tensors="jax")
 # Initialize the JAX model
 model_jax = MistralForCausalLMJAX(model.config)
 
-# JIT the forward pass **WITH CAUTION**:
-# Say, if you generate a 2048 sequence, you are compiling 2048 different functions!
-# All because of shape changes in kv-caching. TODO: Will attempt an optimization soon.
-
-# (uncomment the following if you dare)
-#model_jax.apply = jax.jit(
-#    model_jax.apply, static_argnames=["mutable", "output_hidden_states", "use_cache"]
-#)
-
 # Get the initial parameters (esp. for the mutable variables)
 key = jax.random.PRNGKey(0)
-params = model_jax.init(key, inputs["input_ids"])
+# If len(jax.devices()) > 1, the input is automatically sharded (2, ...) as ("data", "model")
+inputs = model_jax.prepare_input(inputs["input_ids"])
 
-# Replace the model parameter with the converted state dict from the PyTorch model
-params.pop("model")
-params.update(torch_to_jax_states(model.state_dict()))
+# Converted state dict from the PyTorch model, and possibly shard the params (if devices > 1)
+params = model_jax.get_params(weights=torch_to_jax_states(model.state_dict()))
 ```
 To obtain individual logit outputs and kv-cache:
 ```python

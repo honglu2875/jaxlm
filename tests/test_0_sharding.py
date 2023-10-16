@@ -15,17 +15,20 @@
 import functools
 import os
 
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+
 import flax.linen as nn
 import jax
+import torch
 from flax.linen import partitioning as nn_partitioning
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from t5x import partitioning
-from transformers import AutoTokenizer, MistralConfig
+from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM
 
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
+from mistral_jax.utils import torch_to_jax_states
 
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 device_mesh = mesh_utils.create_device_mesh((2, 4))
 mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
 with_sharding_constraint = nn_partitioning.with_sharding_constraint
@@ -53,8 +56,8 @@ def test_sharding():
     model_jax = MistralForCausalLMJax(config)
 
     rules = partitioning.standard_logical_axis_rules(
-        1,
-        1,
+        activation_partitioning_dims=1,
+        parameter_partitioning_dims=1,
         additional_rules=(
             ("kv_length", None),
             ("intermediate", None),
@@ -112,3 +115,52 @@ def test_sharding():
 
     # Assert that the output sharding is correct
     assert o.sharding.spec == PartitionSpec("data", "model")
+
+
+def test_get_params():
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    config = MistralConfig(
+        hidden_size=128,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        sliding_window=3,
+    )
+
+    inputs_jax = tokenizer(
+        ["Hello, my dog is cute", "Hello, my dog is cute"], return_tensors="jax"
+    )
+
+    model_jax = MistralForCausalLMJax(config)
+    model = MistralForCausalLM(config)
+
+    inputs = model_jax.prepare_input(inputs_jax["input_ids"])
+    params = model_jax.get_params(
+        weights=torch_to_jax_states(model, dtype=torch.float32)
+    )
+    print(params)
+
+
+def test_sharded_gen():
+    """Test the simple api of sharded generation."""
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    config = MistralConfig(
+        hidden_size=128,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        sliding_window=3,
+    )
+
+    inputs_jax = tokenizer(
+        ["Hello, my dog is cute", "Hello, my dog is cute"], return_tensors="jax"
+    )
+
+    model_jax = MistralForCausalLMJax(config)
+
+    inputs = model_jax.prepare_input(inputs_jax["input_ids"])
+    params = model_jax.get_params()
+    output = model_jax.generate(params, inputs, do_sample=True, max_length=10)
+    print(output)

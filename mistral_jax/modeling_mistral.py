@@ -23,7 +23,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import functools
 from functools import partial
 from typing import Any, List, Optional, Tuple
 
@@ -32,7 +32,11 @@ import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax.linen import partitioning as nn_partitioning
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from t5x import partitioning as t5x_partitioning
 from t5x.examples.t5 import layers
 
 from ._generate import generate
@@ -715,6 +719,83 @@ class MistralForCausalLM(nn.Module):
     dtype: Any = jnp.float32
     kernel_init: Any = nn.initializers.xavier_uniform()
 
+    sharded: Optional[bool] = len(jax.devices()) > 1 and len(jax.devices()) % 2 == 0
+    device_mesh: Optional[np.ndarray] = (
+        mesh_utils.create_device_mesh((2, len(jax.devices()) // 2)) if sharded else None
+    )
+    mesh: Optional[Mesh] = (
+        Mesh(devices=device_mesh, axis_names=("data", "model")) if sharded else None
+    )
+
+    @staticmethod
+    def mesh_sharding(pspec: PartitionSpec | None, mesh: Mesh | None) -> NamedSharding:
+        if mesh is None:
+            mesh = Mesh(jax.devices(), (None,))
+        return NamedSharding(mesh, pspec)
+
+    def get_params(self, weights=None):
+        key = jax.random.PRNGKey(0)
+        dummy_input = jnp.array([[1, 1], [1, 1]])
+        abstract_variables = jax.eval_shape(self.init, key, dummy_input)
+        if self.sharded:
+            rules = t5x_partitioning.standard_logical_axis_rules(
+                activation_partitioning_dims=1,
+                parameter_partitioning_dims=1,
+                additional_rules=(
+                    ("kv_length", None),
+                    ("intermediate", None),
+                    ("up_sample", "model"),
+                ),
+            )
+            logical_state_spec = nn.get_partition_spec(abstract_variables)
+            logical_state_sharding = nn.logical_to_mesh_sharding(
+                logical_state_spec, self.mesh, rules
+            )
+
+            x_sharding = self.mesh_sharding(
+                PartitionSpec("data", None), self.mesh
+            )  # dimensions: (batch, length)
+
+            params = jax.jit(
+                self.init,
+                in_shardings=(
+                    self.mesh_sharding(None, self.mesh),
+                    x_sharding,
+                ),  # PRNG key and x
+                out_shardings=logical_state_sharding,
+            )(key, dummy_input)
+        else:
+            params = self.init(key, dummy_input)
+
+        if weights is not None:
+            assert isinstance(
+                weights, dict
+            ), f"weights must be a dict, got {type(weights)}"
+            assert (
+                "params" in weights
+            ), f"The key params not found in 'weights'. Got {weights.keys()}"
+            if self.sharded:
+                params.update(
+                    {
+                        "params": jax.jit(
+                            lambda: weights["params"],
+                            in_shardings=None,
+                            out_shardings=logical_state_sharding["params"],
+                        )()
+                    }
+                )
+            else:
+                params.update(weights)
+
+        return params
+
+    def prepare_input(self, inputs):
+        if self.sharded:
+            inputs = jax.device_put(
+                inputs, self.mesh_sharding(PartitionSpec("data", None), self.mesh)
+            )
+        return inputs
+
     def setup(self):
         self.model = MistralModel(
             self.config, dtype=self.dtype, kernel_init=self.kernel_init
@@ -766,17 +847,29 @@ class MistralForCausalLM(nn.Module):
         top_k: int = 0,
         top_p: float = 0.0,
         temp: float = 1.0,
+        no_jit: bool = False,
     ):
+        if no_jit:
+            apply = functools.partial(
+                self.apply, mutable=("cache",), output_hidden_states=False
+            )
+        else:
+            apply = jax.jit(
+                functools.partial(
+                    self.apply, mutable=("cache",), output_hidden_states=False
+                ),
+                static_argnames=("use_cache",),
+            )
+
         def apply_fn(
             params, tok, attention_mask=None, past_key_values=None, use_cache=True
         ):
-            out = self.apply(
+            out = apply(
                 params,
                 jnp.array(tok),
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                mutable=("cache",),
             )[
                 0
             ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache

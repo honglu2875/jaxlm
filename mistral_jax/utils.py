@@ -13,14 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
-
-import jax
 import jax.numpy as jnp
 import torch
-from flax.core.frozen_dict import freeze
-from flax.linen.partitioning import AxisMetadata
-from flax.traverse_util import flatten_dict, unflatten_dict
 
 
 def torch_to_jax_states(
