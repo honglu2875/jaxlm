@@ -16,8 +16,7 @@
 import jax
 import jax.numpy as jnp
 import torch
-from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
-                          MistralModel)
+from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM, MistralModel
 
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
 from mistral_jax import MistralModel as MistralModelJax

@@ -30,7 +30,7 @@ from t5x import partitioning
 from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM
 
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
-from mistral_jax.utils import torch_to_jax_states, save, load
+from mistral_jax.utils import load, save, torch_to_jax_states
 
 device_mesh = mesh_utils.create_device_mesh((2, 4))
 mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
@@ -182,15 +182,13 @@ def test_save_load():
     params = model_jax.get_params()
 
     abs_path = pathlib.Path(__file__).parent.absolute()
-    if os.path.exists(str(abs_path) + '/tmp'):
-        shutil.rmtree(str(abs_path) + '/tmp')
+    if os.path.exists(str(abs_path) + "/tmp"):
+        shutil.rmtree(str(abs_path) + "/tmp")
 
-    save(params, str(abs_path) + '/tmp/')
-    p = load(str(abs_path) + '/tmp/', item=params)
+    save(params, str(abs_path) + "/tmp/")
+    p = load(str(abs_path) + "/tmp/", item=params)
     print(params)
     print(p)
-    assert jax.tree_util.tree_all(
-        jax.tree_map(lambda x, y: jnp.all(x == y), params, p)
-    )
-    if os.path.exists(str(abs_path) + '/tmp'):
-        shutil.rmtree(str(abs_path) + '/tmp')
+    assert jax.tree_util.tree_all(jax.tree_map(lambda x, y: jnp.all(x == y), params, p))
+    if os.path.exists(str(abs_path) + "/tmp"):
+        shutil.rmtree(str(abs_path) + "/tmp")

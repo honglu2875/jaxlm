@@ -14,8 +14,8 @@
 # limitations under the License.
 
 import jax.numpy as jnp
-import torch
 import orbax
+import torch
 
 
 def torch_to_jax_states(
@@ -76,11 +76,11 @@ def torch_to_jax_states(
     return jax_states
 
 
-def save(params, path='tmp/'):
+def save(params, path="tmp/"):
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     orbax_checkpointer.save(path, params)
 
 
-def load(path='tmp/', item=None):
+def load(path="tmp/", item=None):
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     return orbax_checkpointer.restore(path, item=item)

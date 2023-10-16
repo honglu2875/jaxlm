@@ -729,14 +729,20 @@ class MistralForCausalLM(nn.Module):
 
     @staticmethod
     def _parse_mesh_layout(device_mesh_layout):
-        assert isinstance(device_mesh_layout, (list, tuple)), f"device_mesh_layout must be a list or tuple. " \
-                                                              f"Got {type(device_mesh_layout)}"
-        assert len(device_mesh_layout) == 2, f"The length of device_mesh_layout must be 2. " \
-                                             f"Got {len(device_mesh_layout)}"
+        assert isinstance(device_mesh_layout, (list, tuple)), (
+            f"device_mesh_layout must be a list or tuple. "
+            f"Got {type(device_mesh_layout)}"
+        )
+        assert len(device_mesh_layout) == 2, (
+            f"The length of device_mesh_layout must be 2. "
+            f"Got {len(device_mesh_layout)}"
+        )
         mesh_layout = []
         for i in range(2):
             if device_mesh_layout[i] is None:
-                assert device_mesh_layout[1 - i] is not None, f"Invalid device_mesh_layout. Got {device_mesh_layout}."
+                assert (
+                    device_mesh_layout[1 - i] is not None
+                ), f"Invalid device_mesh_layout. Got {device_mesh_layout}."
                 mesh_layout.append(len(jax.devices()) // device_mesh_layout[1 - i])
             else:
                 mesh_layout.append(device_mesh_layout[i])
@@ -759,12 +765,16 @@ class MistralForCausalLM(nn.Module):
 
         mesh_layout = self._parse_mesh_layout(device_mesh_layout)
 
-        dummy_input = jnp.array([[1 for _ in range(mesh_layout[1])] for _ in range(mesh_layout[0])])
+        dummy_input = jnp.array(
+            [[1 for _ in range(mesh_layout[1])] for _ in range(mesh_layout[0])]
+        )
 
         abstract_variables = jax.eval_shape(self.init, key, dummy_input)
         if self.sharded:
-            mesh = Mesh(devices=mesh_utils.create_device_mesh(mesh_layout),
-                        axis_names=("data", "model"))
+            mesh = Mesh(
+                devices=mesh_utils.create_device_mesh(mesh_layout),
+                axis_names=("data", "model"),
+            )
 
             rules = t5x_partitioning.standard_logical_axis_rules(
                 activation_partitioning_dims=1,
@@ -824,8 +834,12 @@ class MistralForCausalLM(nn.Module):
 
     def prepare_input(self, inputs, device_mesh_layout=(1, None)):
         if self.sharded:
-            mesh = Mesh(devices=mesh_utils.create_device_mesh(self._parse_mesh_layout(device_mesh_layout)),
-                        axis_names=("data", "model"))
+            mesh = Mesh(
+                devices=mesh_utils.create_device_mesh(
+                    self._parse_mesh_layout(device_mesh_layout)
+                ),
+                axis_names=("data", "model"),
+            )
             inputs = jax.device_put(
                 inputs, self.mesh_sharding(PartitionSpec("data", None), mesh)
             )

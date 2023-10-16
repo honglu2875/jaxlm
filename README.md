@@ -59,3 +59,16 @@ is done. The compilation time can be improved by only jit-compiling the length d
 certain `stride` number. It is in my TODO list.
 
 (ps: is there a way to let JAX compile different shapes slightly ahead of jit and in parallel?)
+
+To save the checkpoint:
+```python
+from pathlib import Path
+from mistral_jax.utils import save
+abs_path = pathlib.Path(__file__).parent.absolute()
+save(params, str(abs_path) + "/ckpt")
+```
+To load the checkpoint (need an initialized param first)
+```python
+from mistral_jax.utils import load
+p = load(str(abs_path) + "/ckpt", item=params)
+```
