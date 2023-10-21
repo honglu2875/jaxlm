@@ -907,6 +907,22 @@ class MistralForCausalLM(nn.Module):
             attentions=outputs.attentions,
         )
 
+    def wrapped_apply_fn(
+            self, params, tok, past_key_values=None, use_cache=True
+    ) -> tuple[CausalLMOutputWithPast, dict]:
+        out = self.apply(
+            params,
+            jnp.array(tok),
+            mutable=("cache",),
+            output_hidden_states=False,
+            attention_mask=None,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+        )[
+            0
+        ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
+        return out.logits, out.past_key_values
+
     def generate(
         self,
         params,
@@ -924,30 +940,11 @@ class MistralForCausalLM(nn.Module):
                 self.apply, mutable=("cache",), output_hidden_states=False
             )
         else:
-            apply = jax.jit(
-                functools.partial(
-                    self.apply, mutable=("cache",), output_hidden_states=False
-                ),
-                static_argnames=("use_cache",),
-            )
-
-        def apply_fn(
-            params, tok, attention_mask=None, past_key_values=None, use_cache=True
-        ):
-            out = apply(
-                params,
-                jnp.array(tok),
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-            )[
-                0
-            ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
-            return out.logits, out.past_key_values
+            apply = jax.jit(self.wrapped_apply_fn, static_argnames=("use_cache",))
 
         return generate(
             params,
-            apply_fn,
+            apply,
             prompt_tokens,
             do_sample=do_sample,
             seed=seed,
