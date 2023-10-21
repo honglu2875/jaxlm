@@ -1,5 +1,5 @@
 # mistral_jax
-(unofficial) Mistral model in JAX
+(unofficial) Mistral model in JAX using TPU pod. Currently it is working on my GCP TPU v3-8 pods.
 
 ## Quickstart
 
@@ -67,8 +67,8 @@ from mistral_jax.utils import save
 abs_path = pathlib.Path(__file__).parent.absolute()
 save(params, str(abs_path) + "/ckpt")
 ```
-To load the checkpoint (need an initialized param first)
+To load the checkpoint
 ```python
 from mistral_jax.utils import load
-p = load(str(abs_path) + "/ckpt", item=params)
+p = load(str(abs_path) + "/ckpt")
 ```
