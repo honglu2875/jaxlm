@@ -299,9 +299,17 @@ class MistralMLP(nn.Module):
             x.shape[-1] == self.hidden_size
         ), f"Input to MLP layers have different dimensions than the hidden dimension. Got {x.shape[-1]}"
         x = with_sharding_constraint(x, ("batch", "length", "embed"))
-        gate = self.act_fn(with_sharding_constraint(self.gate_proj(x), ("batch", "length", "intermediate")))
-        proj = with_sharding_constraint(self.up_proj(x), ("batch", "length", "intermediate"))
-        x = with_sharding_constraint(self.down_proj(gate * proj), ("batch", "length", "embed"))
+        gate = self.act_fn(
+            with_sharding_constraint(
+                self.gate_proj(x), ("batch", "length", "intermediate")
+            )
+        )
+        proj = with_sharding_constraint(
+            self.up_proj(x), ("batch", "length", "intermediate")
+        )
+        x = with_sharding_constraint(
+            self.down_proj(gate * proj), ("batch", "length", "embed")
+        )
         return x
 
 
@@ -397,7 +405,9 @@ class MistralAttention(nn.Module):
         ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
 
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
-        hidden_states = with_sharding_constraint(hidden_states, ("batch", "length", "embed"))
+        hidden_states = with_sharding_constraint(
+            hidden_states, ("batch", "length", "embed")
+        )
 
         # Obtain q, k, v from the current hidden state and shard q only (k, v will be handled later)
         query_states = self.q_proj(hidden_states)
@@ -461,7 +471,9 @@ class MistralAttention(nn.Module):
             self.head_dim
         )
 
-        attn_weights = with_sharding_constraint(attn_weights, ("batch", "heads", "length", "kv_length"))
+        attn_weights = with_sharding_constraint(
+            attn_weights, ("batch", "heads", "length", "kv_length")
+        )
         _check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
         if attention_mask is not None:
@@ -472,13 +484,17 @@ class MistralAttention(nn.Module):
             hidden_states.dtype
         )
 
-        attn_output = with_sharding_constraint(attn_weights @ value_states, ("batch", "heads", "length", "kv"))
+        attn_output = with_sharding_constraint(
+            attn_weights @ value_states, ("batch", "heads", "length", "kv")
+        )
         _check_shape(attn_output, bsz, self.num_heads, q_len, self.head_dim)
 
         attn_output = jnp.swapaxes(attn_output, 1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        attn_output = with_sharding_constraint(self.o_proj(attn_output), ("batch", "length", "embed"))
+        attn_output = with_sharding_constraint(
+            self.o_proj(attn_output), ("batch", "length", "embed")
+        )
 
         if not output_attentions:
             attn_weights = None
@@ -803,51 +819,35 @@ class MistralForCausalLM(nn.Module):
                 PartitionSpec("data", None), mesh
             )  # dimensions: (batch, length)
 
-            params = jax.jit(
-                self.init,
-                in_shardings=(
-                    self.mesh_sharding(None, mesh),
-                    x_sharding,
-                ),  # PRNG key and x
-                out_shardings=logical_state_sharding,
-            )(key, dummy_input)
+            if weights is not None:
+                assert isinstance(
+                    weights, dict
+                ), f"weights must be a dict, got {type(weights)}"
+                assert (
+                    "params" in weights
+                ), f"The key params not found in 'weights'. Got {weights.keys()}"
+
+                if self.sharded:
+                    params = {
+                        "params": jax.tree_map(
+                            lambda x, y: jax.device_put(x, y),
+                            weights["params"],
+                            logical_state_sharding["params"],
+                        )
+                    }
+                else:
+                    params = weights
+            else:
+                params = jax.jit(
+                    self.init,
+                    in_shardings=(
+                        self.mesh_sharding(None, mesh),
+                        x_sharding,
+                    ),  # PRNG key and x
+                    out_shardings=logical_state_sharding,
+                )(key, dummy_input)
         else:
             params = self.init(key, dummy_input)
-            logical_state_sharding = None
-
-        # If a given set of weights is provided, remove the "params" key of `params` and
-        # replace with a properly sharded weight. Other keys (such as "cache") of
-        # `params` are kept.
-        if weights is not None:
-            assert isinstance(
-                weights, dict
-            ), f"weights must be a dict, got {type(weights)}"
-            assert (
-                "params" in weights
-            ), f"The key params not found in 'weights'. Got {weights.keys()}"
-
-            if self.sharded:
-                params.pop("params")  # remove the "params" key to save vRAM
-                """
-                params.update(
-                    {
-                        "params": jax.jit(
-                            lambda: weights["params"],
-                            in_shardings=None,
-                            out_shardings=logical_state_sharding["params"],
-                        )()
-                    }
-                )
-                """
-                params.update(
-                    {
-                        "params": jax.tree_map(lambda x, y: jax.device_put(x, y),
-                                               weights["params"],
-                                               logical_state_sharding["params"])
-                    }
-                )
-            else:
-                params.update(weights)
 
         return params
 
@@ -897,7 +897,9 @@ class MistralForCausalLM(nn.Module):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
-        logits = with_sharding_constraint(self.lm_head(outputs.last_hidden_state), ("batch", "length", "vocab"))
+        logits = with_sharding_constraint(
+            self.lm_head(outputs.last_hidden_state), ("batch", "length", "vocab")
+        )
         return CausalLMOutputWithPast(
             logits=logits,
             past_key_values=outputs.past_key_values,

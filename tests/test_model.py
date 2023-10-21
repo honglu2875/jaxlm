@@ -16,7 +16,8 @@
 import jax
 import jax.numpy as jnp
 import torch
-from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM, MistralModel
+from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
+                          MistralModel)
 
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
 from mistral_jax import MistralModel as MistralModelJax
@@ -28,9 +29,7 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
         outputs = model(**inputs, output_hidden_states=True)
 
     key = jax.random.PRNGKey(0)
-    params = model_jax.init(key, inputs_jax["input_ids"])
-    params.pop("params")
-    params.update(torch_to_jax_states(model, dtype=torch.float32))
+    params = torch_to_jax_states(model, dtype=torch.float32)
     outputs_jax = model_jax.apply(
         params,
         inputs_jax["input_ids"],

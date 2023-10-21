@@ -28,7 +28,7 @@ def torch_to_jax_states(
         torch.float16: np.float16,
         torch.float32: np.float32,
         torch.float64: np.float64,
-        #"bf16": np.float16,
+        # "bf16": np.float16,
     }
 
     if isinstance(input, torch.nn.Module):
