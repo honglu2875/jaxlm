@@ -270,16 +270,16 @@ class MistralMLP(nn.Module):
             kernel_init=nn.with_logical_partitioning(
                 self.kernel_init, ("embed", "intermediate")
             ),
-            kernel_axes=("intermediate", "embed"),
+            kernel_axes=("embed", "intermediate"),
             name="gate_proj",
         )
         self.up_proj = layers.DenseGeneral(
             self.intermediate_size,
             dtype=self.dtype,
             kernel_init=nn.with_logical_partitioning(
-                self.kernel_init, ("intermediate", "up_sample")
+                self.kernel_init, ("embed", "intermediate")
             ),
-            kernel_axes=("intermediate", "up_sample"),
+            kernel_axes=("embed", "intermediate"),
             name="up_proj",
         )
         # input dim supposed to be self.intermediate_size
@@ -287,9 +287,9 @@ class MistralMLP(nn.Module):
             self.hidden_size,
             dtype=self.dtype,
             kernel_init=nn.with_logical_partitioning(
-                self.kernel_init, ("up_sample", "embed")
+                self.kernel_init, ("intermediate", "embed")
             ),
-            kernel_axes=("up_sample", "embed"),
+            kernel_axes=("intermediate", "embed"),
             name="down_proj",
         )
         self.act_fn = ACT2FN[self.config.hidden_act]
@@ -298,7 +298,11 @@ class MistralMLP(nn.Module):
         assert (
             x.shape[-1] == self.hidden_size
         ), f"Input to MLP layers have different dimensions than the hidden dimension. Got {x.shape[-1]}"
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        x = with_sharding_constraint(x, ("batch", "length", "embed"))
+        gate = self.act_fn(with_sharding_constraint(self.gate_proj(x), ("batch", "length", "intermediate")))
+        proj = with_sharding_constraint(self.up_proj(x), ("batch", "length", "intermediate"))
+        x = with_sharding_constraint(self.down_proj(gate * proj), ("batch", "length", "embed"))
+        return x
 
 
 class MistralAttention(nn.Module):
@@ -393,7 +397,9 @@ class MistralAttention(nn.Module):
         ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
 
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
+        hidden_states = with_sharding_constraint(hidden_states, ("batch", "length", "embed"))
 
+        # Obtain q, k, v from the current hidden state and shard q only (k, v will be handled later)
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -413,12 +419,6 @@ class MistralAttention(nn.Module):
         query_states = with_sharding_constraint(
             query_states, ("batch", "heads", "length", "kv")
         )
-        key_states = with_sharding_constraint(
-            key_states, ("batch", "heads", "kv_length", "kv")
-        )
-        value_states = with_sharding_constraint(
-            value_states, ("batch", "heads", "kv_length", "kv")
-        )
 
         kv_seq_len = key_states.shape[-2] + (
             past_key_value[0].shape[-2] if past_key_value is not None else 0
@@ -428,6 +428,7 @@ class MistralAttention(nn.Module):
             query_states, key_states, cos, sin, position_ids
         )
 
+        # attach kv-cache to k and v if exists, and shard k, v accordingly
         if past_key_value is not None:
             assert (
                 len(past_key_value) == 2
@@ -435,6 +436,13 @@ class MistralAttention(nn.Module):
             past_key, past_value = past_key_value
             key_states = jnp.concatenate([past_key, key_states], axis=2)
             value_states = jnp.concatenate([past_value, value_states], axis=2)
+
+        key_states = with_sharding_constraint(
+            key_states, ("batch", "heads", "kv_length", "kv")
+        )
+        value_states = with_sharding_constraint(
+            value_states, ("batch", "heads", "kv_length", "kv")
+        )
 
         past_key_value = (key_states, value_states) if use_cache else None
 
@@ -453,6 +461,7 @@ class MistralAttention(nn.Module):
             self.head_dim
         )
 
+        attn_weights = with_sharding_constraint(attn_weights, ("batch", "heads", "length", "kv_length"))
         _check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
         if attention_mask is not None:
@@ -462,14 +471,14 @@ class MistralAttention(nn.Module):
         attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(
             hidden_states.dtype
         )
-        attn_output = attn_weights @ value_states
 
+        attn_output = with_sharding_constraint(attn_weights @ value_states, ("batch", "heads", "length", "kv"))
         _check_shape(attn_output, bsz, self.num_heads, q_len, self.head_dim)
 
         attn_output = jnp.swapaxes(attn_output, 1, 2)
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        attn_output = self.o_proj(attn_output)
+        attn_output = with_sharding_constraint(self.o_proj(attn_output), ("batch", "length", "embed"))
 
         if not output_attentions:
             attn_weights = None
@@ -879,7 +888,7 @@ class MistralForCausalLM(nn.Module):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
-        logits = self.lm_head(outputs.last_hidden_state)
+        logits = with_sharding_constraint(self.lm_head(outputs.last_hidden_state), ("batch", "length", "vocab"))
         return CausalLMOutputWithPast(
             logits=logits,
             past_key_values=outputs.past_key_values,

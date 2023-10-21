@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax.numpy as jnp
 import numpy as np
 import orbax
 import torch
 
 
 def torch_to_jax_states(
-    input: torch.nn.Module | dict, dtype: str | torch.dtype = "bf16"
+    input: torch.nn.Module | dict, dtype: str | torch.dtype = torch.float16
 ):
     """
     Converts the states of a PyTorch model to JAX states.
@@ -29,7 +28,7 @@ def torch_to_jax_states(
         torch.float16: np.float16,
         torch.float32: np.float32,
         torch.float64: np.float64,
-        "bf16": np.bfloat16,
+        #"bf16": np.float16,
     }
 
     if isinstance(input, torch.nn.Module):
