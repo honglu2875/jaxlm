@@ -815,7 +815,7 @@ class MistralForCausalLM(nn.Module):
             params = self.init(key, dummy_input)
             logical_state_sharding = None
 
-        # If a given set of weights exists, remove the "params" key of `params` and
+        # If a given set of weights is provided, remove the "params" key of `params` and
         # replace with a properly sharded weight. Other keys (such as "cache") of
         # `params` are kept.
         if weights is not None:
@@ -828,6 +828,7 @@ class MistralForCausalLM(nn.Module):
 
             if self.sharded:
                 params.pop("params")  # remove the "params" key to save vRAM
+                """
                 params.update(
                     {
                         "params": jax.jit(
@@ -835,6 +836,14 @@ class MistralForCausalLM(nn.Module):
                             in_shardings=None,
                             out_shardings=logical_state_sharding["params"],
                         )()
+                    }
+                )
+                """
+                params.update(
+                    {
+                        "params": jax.tree_map(lambda x, y: jax.device_put(x, y),
+                                               weights["params"],
+                                               logical_state_sharding["params"])
                     }
                 )
             else:
