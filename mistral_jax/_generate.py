@@ -58,6 +58,7 @@ def top_k_top_p_filtering(
         top_k: keep only top k tokens with the rest marked as 'filter_value'
         top_p: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
             The rest are marked as 'filter_value'.
+        filter_value: the value used to replace the filtered entries
     """
     logits = jax.lax.cond(
         top_k > 0,
@@ -75,7 +76,18 @@ def top_k_top_p_filtering(
     return logits
 
 
-# TODO: generation is super slow because jit compiles every single shape of kv cache...... Need a stride to avoid this.
+@functools.partial(jax.jit, static_argnames=("top_k", "top_p"))
+def sample_with_tk_tp(rng, logits, top_k, top_p):
+    return jax.random.categorical(rng,
+                                  top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p))
+
+
+@functools.partial(jax.jit, static_argnames=("length", "axis"))
+def _pad_to(x, length, axis=0):
+    pad_shape = x.shape[:axis] + (length - x.shape[axis],) + x.shape[axis + 1:]
+    return jnp.concatenate((jnp.zeros(pad_shape), x), axis=axis)
+
+
 def generate(
     params,
     eval_fn,
@@ -86,7 +98,7 @@ def generate(
     top_k: int = 0,
     top_p: float = 0.0,
     temp: float = 1.0,
-    caching_stride: int = 16,
+    generation_only: bool = False,
 ):
     """
     Args:
@@ -99,8 +111,7 @@ def generate(
         top_k: top k
         top_p: top p
         temp: temperature
-        caching_stride: TODO: the stride for bumping the shape of the sequence length axis.
-            Larger stride avoids compiling too many functions.
+        generation_only: return newly generated tokens only
     Returns:
         the completed token array (containing the prompt)
     """
@@ -111,25 +122,39 @@ def generate(
     else:
         current_state = prompt_tokens
 
-    past_key_values = None
     rng = jax.random.PRNGKey(seed)
-    for _ in range(max_len):
-        key, subkey = jax.random.split(rng)
-        if past_key_values is None:
-            tok = current_state
-        else:
-            tok = current_state[:, -1:]
+
+    if do_sample:
+        sample_fn = sample_with_tk_tp
+    else:
+        sample_fn = lambda rng, logits, *args: jnp.argmax(logits, axis=-1)
+
+    first_generated_logit, past_key_values = eval_fn(
+            params, current_state, past_key_values=None, use_cache=True
+    )
+    first_generated_tok = sample_fn(rng, first_generated_logit[:, -1:] * 1.0 / temp, top_k, top_p)
+    past_key_values = jax.tree_map(functools.partial(_pad_to, length=max_len, axis=2), past_key_values)
+
+    @jax.jit
+    def loop_fn(past_kv_and_rng_and_out, i):
+        past_key_values, key, tok = past_kv_and_rng_and_out
+        key, subkey = jax.random.split(key)
         outputs, past_key_values = eval_fn(
-            params, tok, past_key_values=past_key_values, use_cache=True
+            params, tok, past_key_values=past_key_values, use_cache=True, unpadded_past_kv_length=i
         )
 
         logits = outputs[:, -1:] * 1.0 / temp
-        if do_sample:
-            logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
-            out_tk = jax.random.categorical(subkey, logits)
-        else:
-            out_tk = jnp.argmax(logits, axis=-1)
 
-        current_state = jnp.concatenate((current_state, out_tk), axis=-1)
+        out_tk = sample_fn(rng, logits, top_k, top_p)
 
-    return current_state
+        return (past_key_values, key, out_tk), out_tk.squeeze(1).T
+
+    generated_toks = jax.lax.scan(loop_fn,
+                                  (past_key_values, rng, current_state[:, -1:]),
+                                  jnp.arange(1, max_len),
+                                  )[1].T
+
+    if generation_only:
+        return jnp.concatenate((first_generated_tok, generated_toks), axis=-1)
+    else:
+        return jnp.concatenate((current_state, first_generated_tok, generated_toks), axis=-1)

@@ -107,9 +107,8 @@ def _make_sliding_window_causal_mask(
     """
     bsz, tgt_len = input_ids_shape
 
-    tensor = jnp.full(
+    tensor = jnp.ones(
         (tgt_len, tgt_len),
-        fill_value=1,
     )
     mask = jnp.tril(tensor, k=0)
     # make the mask banded to account for sliding window
@@ -413,6 +412,7 @@ class MistralAttention(nn.Module):
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+
         query_states = jnp.swapaxes(
             query_states.reshape(bsz, q_len, self.num_heads, self.head_dim), 1, 2
         )
@@ -430,12 +430,12 @@ class MistralAttention(nn.Module):
             query_states, ("batch", "heads", "length", "kv")
         )
 
-        kv_seq_len = key_states.shape[-2] + (
-            past_key_value[0].shape[-2] if past_key_value is not None else 0
-        )
+        past_kv_length = past_key_value[0].shape[-2] if past_key_value is not None else 0
+        kv_seq_len = key_states.shape[-2] + past_kv_length
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+
         query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, position_ids
+            query_states, key_states, cos, sin, position_ids[:, past_kv_length:]
         )
 
         # attach kv-cache to k and v if exists, and shard k, v accordingly
@@ -655,30 +655,24 @@ class MistralModel(nn.Module):
 
         batch_size, seq_length = input_ids.shape
 
-        seq_length_with_past = seq_length
         past_key_values_length = 0
 
         if past_key_values is not None:
             past_key_values_length = past_key_values[0][0].shape[2]
-            seq_length_with_past = seq_length_with_past + past_key_values_length
-
-        if position_ids is None:
-            position_ids = jnp.expand_dims(
-                jnp.arange(
-                    past_key_values_length,
-                    seq_length + past_key_values_length,
-                    dtype=jnp.int32,
-                ),
-                0,
-            )
 
         padding_mask = None
 
         # embed positions
         if attention_mask is None:
-            attention_mask = jnp.ones((batch_size, seq_length_with_past), dtype=bool)
+            attention_mask = jnp.ones((batch_size, seq_length + past_key_values_length), dtype=bool)
         else:
             padding_mask = attention_mask
+
+        if position_ids is None:
+            position_ids = jnp.arange(
+                    seq_length,
+                    dtype=jnp.int32,
+            )[None] + attention_mask[0][:-seq_length].sum()
 
         inputs_embeds = self.embed_tokens(input_ids)
         attention_mask = self._prepare_decoder_attention_mask(
@@ -908,20 +902,41 @@ class MistralForCausalLM(nn.Module):
         )
 
     def wrapped_apply_fn(
-            self, params, tok, past_key_values=None, use_cache=True
+            self, params, tok, past_key_values=None, use_cache=True,
+            unpadded_past_kv_length=None
     ) -> tuple[CausalLMOutputWithPast, dict]:
+        tok = jnp.array(tok)
+        if unpadded_past_kv_length is not None:
+            assert past_key_values is not None
+            assert tok.shape[1] == 1, f"When kv cache padding is enabled, only support when query seq = 1. " \
+                                      f"Got {tok.shape[1]} instead."
+            past_kv_length = past_key_values[0][0].shape[2]
+
+            position_ids = jnp.arange(past_kv_length + 1) - unpadded_past_kv_length
+            attention_mask = jnp.repeat(
+                (position_ids >= 0)[None], repeats=tok.shape[0], axis=0)
+            position_ids = jnp.where(position_ids >= 0, position_ids, 0)[None]
+
+        else:
+            position_ids, attention_mask = None, None
+
         out = self.apply(
             params,
-            jnp.array(tok),
+            tok,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
             mutable=("cache",),
             output_hidden_states=False,
-            attention_mask=None,
             past_key_values=past_key_values,
             use_cache=use_cache,
         )[
             0
         ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
-        return out.logits, out.past_key_values
+        if unpadded_past_kv_length is not None:  # padding is applied: truncate the past kv back to same length
+            past_key_values = jax.tree_map(lambda x: x[:, :, tok.shape[1]:], out.past_key_values)
+        else:
+            past_key_values = out.past_key_values
+        return out.logits, past_key_values
 
     def generate(
         self,
@@ -936,9 +951,7 @@ class MistralForCausalLM(nn.Module):
         no_jit: bool = False,
     ):
         if no_jit:
-            apply = functools.partial(
-                self.apply, mutable=("cache",), output_hidden_states=False
-            )
+            apply = self.wrapped_apply_fn
         else:
             apply = jax.jit(self.wrapped_apply_fn, static_argnames=("use_cache",))
 
