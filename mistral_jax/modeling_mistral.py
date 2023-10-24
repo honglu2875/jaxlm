@@ -437,7 +437,6 @@ class MistralAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids[:, past_kv_length:]
         )
-
         # attach kv-cache to k and v if exists, and shard k, v accordingly
         if past_key_value is not None:
             assert (
@@ -915,7 +914,7 @@ class MistralForCausalLM(nn.Module):
             position_ids = jnp.arange(past_kv_length + 1) - (past_kv_length - unpadded_past_kv_length)
             attention_mask = jnp.repeat(
                 (position_ids >= 0)[None], repeats=tok.shape[0], axis=0)
-            position_ids = jnp.where(position_ids >= 0, position_ids, 0)[None]
+            position_ids = jnp.repeat(jnp.where(position_ids >= 0, position_ids, 0)[None], repeats=tok.shape[0], axis=0)
         else:
             position_ids, attention_mask = None, None
 

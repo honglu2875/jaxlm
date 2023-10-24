@@ -88,6 +88,19 @@ def _pad_to(x, length, axis=0):
     return jnp.concatenate((jnp.zeros(pad_shape), x), axis=axis)
 
 
+@functools.partial(jax.jit, static_argnames=("sample_fn", "eval_fn", "top_k", "top_p", "temp"))
+def _loop_fn(past_kv_and_rng_and_out, i, params, sample_fn, eval_fn, top_k, top_p, temp):
+    past_key_values, key, tok = past_kv_and_rng_and_out
+    key, subkey = jax.random.split(key)
+    outputs, past_key_values = eval_fn(
+        params, tok, past_key_values=past_key_values, use_cache=True, unpadded_past_kv_length=i
+    )
+    logits = outputs[:, -1:] / temp
+    out_tk = sample_fn(key, logits, top_k, top_p)
+
+    return (past_key_values, key, out_tk), out_tk.squeeze(1).T
+
+
 def generate(
     params,
     eval_fn,
@@ -134,21 +147,12 @@ def generate(
     first_generated_tok = sample_fn(rng, first_generated_logit[:, -1:] * 1.0 / temp, top_k, top_p)
     past_key_values = jax.tree_map(functools.partial(_pad_to, length=prompt_len + max_len, axis=2), past_key_values)
 
-    @jax.jit
-    def loop_fn(past_kv_and_rng_and_out, i):
-        past_key_values, key, tok = past_kv_and_rng_and_out
-        key, subkey = jax.random.split(key)
-        outputs, past_key_values = eval_fn(
-            params, tok, past_key_values=past_key_values, use_cache=True, unpadded_past_kv_length=i
-        )
-        logits = outputs[:, -1:] * 1.0 / temp
-        out_tk = sample_fn(rng, logits, top_k, top_p)
-
-        return (past_key_values, key, out_tk), out_tk.squeeze(1).T
+    loop_fn = functools.partial(_loop_fn, params=params, sample_fn=sample_fn, eval_fn=eval_fn,
+                                top_k=top_k, top_p=top_p, temp=temp)
 
     generated_toks = jax.lax.scan(loop_fn,
                                   (past_key_values, rng, prompt_tokens[:, -1:]),
-                                  jnp.arange(max_len - 1) + prompt_len + 1,
+                                  jnp.arange(max_len - 1) + prompt_len,
                                   )[1].T
 
     if generation_only:
