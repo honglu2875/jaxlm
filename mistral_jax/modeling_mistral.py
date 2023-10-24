@@ -912,11 +912,10 @@ class MistralForCausalLM(nn.Module):
                                       f"Got {tok.shape[1]} instead."
             past_kv_length = past_key_values[0][0].shape[2]
 
-            position_ids = jnp.arange(past_kv_length + 1) - unpadded_past_kv_length
+            position_ids = jnp.arange(past_kv_length + 1) - (past_kv_length - unpadded_past_kv_length)
             attention_mask = jnp.repeat(
                 (position_ids >= 0)[None], repeats=tok.shape[0], axis=0)
             position_ids = jnp.where(position_ids >= 0, position_ids, 0)[None]
-
         else:
             position_ids, attention_mask = None, None
 

@@ -116,13 +116,12 @@ def generate(
         the completed token array (containing the prompt)
     """
     if isinstance(prompt_tokens, list):
-        current_state = jnp.array(prompt_tokens)
+        prompt_tokens = jnp.array(prompt_tokens)
     elif len(prompt_tokens.shape) == 1:
-        current_state = prompt_tokens[None, :]
-    else:
-        current_state = prompt_tokens
+        prompt_tokens = prompt_tokens[None, :]
 
     rng = jax.random.PRNGKey(seed)
+    batch_size, prompt_len = prompt_tokens.shape[:2]
 
     if do_sample:
         sample_fn = sample_with_tk_tp
@@ -130,10 +129,10 @@ def generate(
         sample_fn = lambda rng, logits, *args: jnp.argmax(logits, axis=-1)
 
     first_generated_logit, past_key_values = eval_fn(
-            params, current_state, past_key_values=None, use_cache=True
+            params, prompt_tokens, past_key_values=None, use_cache=True
     )
     first_generated_tok = sample_fn(rng, first_generated_logit[:, -1:] * 1.0 / temp, top_k, top_p)
-    past_key_values = jax.tree_map(functools.partial(_pad_to, length=max_len, axis=2), past_key_values)
+    past_key_values = jax.tree_map(functools.partial(_pad_to, length=prompt_len + max_len, axis=2), past_key_values)
 
     @jax.jit
     def loop_fn(past_kv_and_rng_and_out, i):
@@ -142,19 +141,17 @@ def generate(
         outputs, past_key_values = eval_fn(
             params, tok, past_key_values=past_key_values, use_cache=True, unpadded_past_kv_length=i
         )
-
         logits = outputs[:, -1:] * 1.0 / temp
-
         out_tk = sample_fn(rng, logits, top_k, top_p)
 
         return (past_key_values, key, out_tk), out_tk.squeeze(1).T
 
     generated_toks = jax.lax.scan(loop_fn,
-                                  (past_key_values, rng, current_state[:, -1:]),
-                                  jnp.arange(1, max_len),
+                                  (past_key_values, rng, prompt_tokens[:, -1:]),
+                                  jnp.arange(max_len - 1) + prompt_len + 1,
                                   )[1].T
 
     if generation_only:
         return jnp.concatenate((first_generated_tok, generated_toks), axis=-1)
     else:
-        return jnp.concatenate((current_state, first_generated_tok, generated_toks), axis=-1)
+        return jnp.concatenate((prompt_tokens, first_generated_tok, generated_toks), axis=-1)
