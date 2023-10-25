@@ -22,6 +22,7 @@ from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
 from mistral_jax import MistralModel as MistralModelJax
 from mistral_jax.utils import torch_to_jax_states
+from naive_generate import generate as naive_generate
 
 
 def _forward_pass(model, model_jax, inputs, inputs_jax):
@@ -104,10 +105,24 @@ def test_generate():
 
     assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-3)
 
-    # make sure do_sample works (but no ground truth to compare to)
+    # make sure do_sample works and compare to a naive high-latency implementation
+    def eval_fn(params, tok, past_key_values=None, use_cache=True) -> tuple:
+        out = model_jax.apply(
+            params,
+            jnp.array(tok),
+            mutable=("cache",),
+            output_hidden_states=False,
+            attention_mask=None,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+        )[0]
+        return out.logits, out.past_key_values
+
     out_jax = model_jax.generate(
-        params, inputs_jax["input_ids"], do_sample=True, max_length=10
+        params, inputs_jax["input_ids"], do_sample=True, max_length=20
     )
+    naive_out = naive_generate(params, eval_fn, inputs_jax["input_ids"], do_sample=True, max_len=20,)
+    assert jnp.all(out_jax == naive_out)
 
     # compare do_sample=False with reference impl
     with torch.no_grad():

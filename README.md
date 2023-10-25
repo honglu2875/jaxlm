@@ -1,6 +1,9 @@
 # mistral_jax
 (unofficial) Mistral model in JAX using TPU pod. Currently it is working on my GCP TPU v3-8 pods.
 
+This repo is deeply indebted to the [Google TRC program](https://sites.research.google/trc/faq/) without which
+none of the codes here could have been implemented, tested and used in research use-cases.
+
 ## Quickstart
 
 ```bash
@@ -53,10 +56,6 @@ out_jax = model_jax.generate(
 )
 completion = tokenizer.batch_decode(out_jax)
 ```
-**Warning:** if `max_length` is large, the first generation will be very slow because 
-JAX will compile all different shapes of kv cache. It will become faster once the compilation
-is done. The compilation time can be improved by only jit-compiling the length divisible by
-certain `stride` number. It is in my TODO list.
 
 (ps: is there a way to let JAX compile different shapes slightly ahead of jit and in parallel?)
 

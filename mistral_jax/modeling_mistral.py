@@ -402,7 +402,6 @@ class MistralAttention(nn.Module):
         assert (
             hidden_states.shape[-1] == self.hidden_size
         ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
-
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
         hidden_states = with_sharding_constraint(
             hidden_states, ("batch", "length", "embed")
@@ -445,7 +444,6 @@ class MistralAttention(nn.Module):
             past_key, past_value = past_key_value
             key_states = jnp.concatenate([past_key, key_states], axis=2)
             value_states = jnp.concatenate([past_value, value_states], axis=2)
-
         key_states = with_sharding_constraint(
             key_states, ("batch", "heads", "kv_length", "kv")
         )
@@ -654,10 +652,7 @@ class MistralModel(nn.Module):
 
         batch_size, seq_length = input_ids.shape
 
-        past_key_values_length = 0
-
-        if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
+        past_key_values_length = 0 if past_key_values is None else past_key_values[0][0].shape[2]
 
         padding_mask = None
 
@@ -669,9 +664,10 @@ class MistralModel(nn.Module):
 
         if position_ids is None:
             position_ids = jnp.arange(
-                    seq_length,
+                    seq_length + past_key_values_length,
                     dtype=jnp.int32,
-            )[None] + attention_mask[0][:-seq_length].sum()
+            )[None] - (~attention_mask[0, :-seq_length]).sum()
+            position_ids = jnp.where(position_ids >= 0, position_ids, 0)
 
         inputs_embeds = self.embed_tokens(input_ids)
         attention_mask = self._prepare_decoder_attention_mask(

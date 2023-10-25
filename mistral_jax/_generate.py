@@ -151,7 +151,7 @@ def generate(
                                 top_k=top_k, top_p=top_p, temp=temp)
 
     generated_toks = jax.lax.scan(loop_fn,
-                                  (past_key_values, rng, prompt_tokens[:, -1:]),
+                                  (past_key_values, rng, first_generated_tok),
                                   jnp.arange(max_len - 1) + prompt_len,
                                   )[1].T
 

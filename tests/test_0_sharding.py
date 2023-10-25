@@ -36,7 +36,7 @@ device_mesh = mesh_utils.create_device_mesh((2, 4))
 mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
 with_sharding_constraint = nn_partitioning.with_sharding_constraint
 
-jax.config.update("jax_disable_jit", True)
+
 def mesh_sharding(pspec: PartitionSpec | None) -> NamedSharding:
     return NamedSharding(mesh, pspec)
 
@@ -166,8 +166,6 @@ def test_sharded_gen():
     inputs = model_jax.prepare_input(inputs_jax["input_ids"])
     params = model_jax.get_params()
     output = model_jax.generate(params, inputs, do_sample=True, max_length=10)
-    print(output)
-    raise ValueError
 
 
 def test_save_load():
