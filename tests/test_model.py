@@ -41,7 +41,7 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
     return outputs, outputs_jax, params
 
 
-def _setup_models(model_cls, model_cls_jax, jit=True):
+def _setup_models(model_cls, model_cls_jax, jit=True, repeat=1):
     tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
     config = MistralConfig(
         hidden_size=64,
@@ -58,8 +58,8 @@ def _setup_models(model_cls, model_cls_jax, jit=True):
             model_jax.apply,
             static_argnames=["mutable", "output_hidden_states", "use_cache"],
         )
-    inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
-    inputs_jax = tokenizer("Hello, my dog is cute", return_tensors="jax")
+    inputs = tokenizer(["Hello, my dog is cute"] * repeat, return_tensors="pt")
+    inputs_jax = tokenizer(["Hello, my dog is cute"] * repeat, return_tensors="jax")
     return tokenizer, model, model_jax, inputs, inputs_jax
 
 
@@ -99,7 +99,7 @@ def test_model():
 
 def test_generate():
     tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
-        MistralForCausalLM, MistralForCausalLMJax
+        MistralForCausalLM, MistralForCausalLMJax, repeat=4,
     )
     outputs, outputs_jax, params = _forward_pass(model, model_jax, inputs, inputs_jax)
 

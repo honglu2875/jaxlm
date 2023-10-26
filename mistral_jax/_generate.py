@@ -22,13 +22,20 @@ import jax.numpy as jnp
 @functools.partial(jax.jit, static_argnames=("top_k", "filter_value"))
 def top_k_filtering(logits, top_k=32, filter_value=-float("Inf")):
     # Remove all tokens with a probability less than the last token of the top-k
-    sorted_indices = jnp.argsort(-logits)
-    k_th_value = jnp.take_along_axis(
-        logits, sorted_indices[..., top_k - 1][..., None], axis=-1
-    ).squeeze(-1)
-    logits = jnp.where(logits < k_th_value[..., None], filter_value, logits)
+    if top_k >= logits.shape[-1]:
+        return logits  # No need to filter if top_k is greater than or equal to the number of classes
 
-    return logits
+        # Use jax.lax.top_k to get the top-k values and their indices
+    values, indices = jax.lax.top_k(logits, top_k)
+
+    # Create a mask where entries are True if their corresponding indices are in the top-k
+    mask = jnp.zeros_like(logits, dtype=bool)
+    mask = mask.at[indices].set(True)
+
+    # Apply the mask to the logits, replacing values that are not in the top-k with the filter_value
+    filtered_logits = jnp.where(mask, logits, filter_value)
+
+    return filtered_logits
 
 
 @functools.partial(jax.jit, static_argnames=("top_p", "filter_value"))
@@ -60,18 +67,10 @@ def top_k_top_p_filtering(
             The rest are marked as 'filter_value'.
         filter_value: the value used to replace the filtered entries
     """
-    logits = jax.lax.cond(
-        top_k > 0,
-        lambda x: top_k_filtering(x, top_k=top_k, filter_value=filter_value),
-        lambda x: x,
-        logits,
-    )
-    logits = jax.lax.cond(
-        top_p > 0.0,
-        lambda x: top_p_filtering(x, top_p=top_p, filter_value=filter_value),
-        lambda x: x,
-        logits,
-    )
+    if top_k > 0:
+        logits = top_k_filtering(logits, top_k=top_k, filter_value=filter_value)
+    if top_p > 0:
+        logits = top_p_filtering(logits, top_p=top_p, filter_value=filter_value)
 
     return logits
 
