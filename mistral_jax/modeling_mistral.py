@@ -795,8 +795,7 @@ class MistralForCausalLM(nn.Module):
                 parameter_partitioning_dims=1,
                 additional_rules=(
                     ("kv_length", None),
-                    ("intermediate", None),
-                    ("up_sample", "model"),
+                    ("intermediate", "model"),
                 ),
             )
             logical_state_spec = nn.get_partition_spec(abstract_variables)
@@ -840,7 +839,7 @@ class MistralForCausalLM(nn.Module):
 
         return params
 
-    def prepare_input(self, inputs, device_mesh_layout=(1, None)):
+    def prepare_input(self, inputs, device_mesh_layout=(1, None), dtype=None):
         if self.sharded:
             mesh = Mesh(
                 devices=mesh_utils.create_device_mesh(
@@ -851,6 +850,8 @@ class MistralForCausalLM(nn.Module):
             inputs = jax.device_put(
                 inputs, self.mesh_sharding(PartitionSpec("data", None), mesh)
             )
+        if dtype is not None:
+            inputs = jax.tree_map(lambda x: x.astype(dtype), inputs)
         return inputs
 
     def setup(self):
