@@ -669,7 +669,7 @@ class MistralModel(nn.Module):
             )[None] - (~attention_mask[0, :-seq_length]).sum()
             position_ids = jnp.where(position_ids >= 0, position_ids, 0)
 
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids).astype(self.dtype)
         attention_mask = self._prepare_decoder_attention_mask(
             attention_mask,
             (batch_size, seq_length),
