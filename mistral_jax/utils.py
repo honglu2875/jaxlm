@@ -16,6 +16,7 @@
 import numpy as np
 import orbax
 import torch
+from .types import Array, DType, PRNGKey, Shape
 
 
 def torch_to_jax_states(
@@ -84,3 +85,13 @@ def save(params, path="tmp/"):
 def load(path="tmp/", item=None):
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     return orbax_checkpointer.restore(path, item=item)
+
+def variance_scaling_init(scale: int, mode: str, distribution: str):
+    """Common choices:
+    mode: "fan_in", "fan_out", "fan_avg"
+    distribution: "normal", "truncated_normal", ...
+    """
+    def init_fn(key: PRNGKey, shape: Shape, dtype: DType, in_axis: int, out_axis: int):
+        fn = jax.nn.initializers.variance_scaling(scale, mode, distribution, in_axis, out_axis)
+        return fn(key, shape, dtype)
+    return init_fn

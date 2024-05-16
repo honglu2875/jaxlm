@@ -22,6 +22,7 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax.linen import partitioning as nn_partitioning
 from jax.experimental import mesh_utils
@@ -32,9 +33,11 @@ from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
 from mistral_jax.utils import load, save, torch_to_jax_states
 
-device_mesh = mesh_utils.create_device_mesh((2, 4))
+num_devices = jax.device_count()
+device_mesh = mesh_utils.create_device_mesh((2, num_devices // 2))
 mesh = Mesh(devices=device_mesh, axis_names=("data", "model"))
 with_sharding_constraint = nn_partitioning.with_sharding_constraint
+MODEL_PATH = "NousResearch/Yarn-Mistral-7b-64k"
 
 
 def mesh_sharding(pspec: PartitionSpec | None) -> NamedSharding:
@@ -42,7 +45,7 @@ def mesh_sharding(pspec: PartitionSpec | None) -> NamedSharding:
 
 
 def test_sharding():
-    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     config = MistralConfig(
         hidden_size=128,
         intermediate_size=128,
@@ -121,7 +124,7 @@ def test_sharding():
 
 
 def test_get_params():
-    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     config = MistralConfig(
         hidden_size=128,
         intermediate_size=128,
@@ -147,7 +150,7 @@ def test_get_params():
 
 def test_sharded_gen():
     """Test the simple api of sharded generation."""
-    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
     config = MistralConfig(
         hidden_size=128,
         intermediate_size=128,
@@ -188,6 +191,6 @@ def test_save_load():
     p = load(str(abs_path) + "/tmp/", item=params)
     print(params)
     print(p)
-    assert jax.tree_util.tree_all(jax.tree_map(lambda x, y: jnp.all(x == y), params, p))
+    assert jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x, y: np.all(np.array(x) == np.array(y)), params, p))
     if os.path.exists(str(abs_path) + "/tmp"):
         shutil.rmtree(str(abs_path) + "/tmp")

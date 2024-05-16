@@ -41,6 +41,7 @@ from t5x.examples.t5 import layers
 
 from ._generate import generate
 from .activations import ACT2FN
+from .position import RotaryEmbedding, apply_rotary_pos_emb
 
 """
 Notes:
@@ -171,72 +172,6 @@ class MistralRMSNorm(nn.Module):
         return self.weight * hidden_states.astype(input_dtype)
 
 
-class MistralRotaryEmbedding(nn.Module):
-    dim: int
-    max_position_embeddings: int = 2048
-    base: int = 10000
-
-    def setup(self):
-        self.inv_freq = self.variable(
-            "cache",
-            "inv_freq",
-            lambda: 1.0
-            / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)),
-        )
-
-        self._set_cos_sin_cache(seq_len=self.max_position_embeddings, dtype=jnp.float32)
-
-    @nn.compact
-    def _set_cos_sin_cache(self, seq_len, dtype):
-        self.max_seq_len_cached = seq_len
-        t = jnp.arange(self.max_seq_len_cached, dtype=jnp.int32)
-
-        freqs = jnp.einsum("i,j->ij", t, self.inv_freq.value)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = jnp.concatenate((freqs, freqs), axis=-1)
-        is_initialized = self.has_variable("cache", "cos_cached")
-        self.cos_cached = self.variable(
-            "cache", "cos_cached", lambda: jnp.cos(emb).astype(dtype)
-        )
-        self.sin_cached = self.variable(
-            "cache", "sin_cached", lambda: jnp.sin(emb).astype(dtype)
-        )
-        if is_initialized:
-            self.cos_cached.value = jnp.cos(emb).astype(dtype)
-            self.sin_cached.value = jnp.sin(emb).astype(dtype)
-
-    def __call__(self, x: jnp.ndarray, seq_len=None):
-        # x: [bs, num_attention_heads, seq_len, head_size]
-        if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len=seq_len, dtype=jnp.float32)
-
-        return (
-            self.cos_cached.value[:seq_len].astype(x.dtype),
-            self.sin_cached.value[:seq_len].astype(x.dtype),
-        )
-
-
-# Copied from transformers.models.llama.modeling_llama.rotate_half
-@jax.jit
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return jnp.concatenate((-x2, x1), axis=-1)
-
-
-# Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
-@jax.jit
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
-    # [seq_len, dim] -> [batch_size, 1, seq_len, head_dim]
-    cos = jnp.expand_dims(jnp.take(cos, position_ids, axis=0), axis=1)
-    sin = jnp.expand_dims(jnp.take(sin, position_ids, axis=0), axis=1)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-@partial(jax.jit, static_argnames=("n_rep",))
 def repeat_kv(hidden_states: jnp.ndarray, n_rep: int) -> jnp.ndarray:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -376,9 +311,9 @@ class MistralAttention(nn.Module):
             name="o_proj",
         )
 
-        self.rotary_emb = MistralRotaryEmbedding(
-            self.head_dim,
-            max_position_embeddings=self.max_position_embeddings,
+        self.rotary_emb = RotaryEmbedding(
+            dim=self.head_dim,
+            max_length=self.max_position_embeddings,
             base=self.rope_theta,
         )
 
