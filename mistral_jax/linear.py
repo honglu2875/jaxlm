@@ -24,8 +24,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from .types import Array, Config, DType
-from .utils import variance_scaling_init
+from .types import PRNGKey, Array, Config, DType, Shape
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 
@@ -58,9 +57,20 @@ class DenseGeneral(nn.Module):
     axis: Union[Iterable[int], int] = -1
     weight_dtype: DType = jnp.float32
     dtype: DType = jnp.float32
-    kernel_init: Callable = variance_scaling_init(1.0, "fan_in", "truncated_normal")
+    kernel_init: Callable = nn.initializers.variance_scaling
+    kernel_init_args: tuple = (1.0, "fan_in", "truncated_normal")
+    with_logical_partitioning: bool = True
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
+
+    def setup(self):
+        # wrap over init function in order to receive in_axis and out_axis
+        def init_fn(key: PRNGKey, shape: Shape, dtype: DType, in_axis: int, out_axis: int):
+            fn = self.kernel_init(*self.kernel_init_args, in_axis=in_axis, out_axis=out_axis)
+            if self.with_logical_partitioning:
+                fn = nn.with_logical_partitioning(fn, self.kernel_axes)
+            return fn(key, shape, dtype)
+        self.wrapped_kernel_init = init_fn
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
@@ -89,7 +99,7 @@ class DenseGeneral(nn.Module):
         kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
         kernel = self.param(
             "kernel",
-            nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+            self.wrapped_kernel_init,
             kernel_shape,
             self.weight_dtype,
             kernel_in_axis,
