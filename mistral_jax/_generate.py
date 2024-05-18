@@ -144,7 +144,7 @@ def generate(
             params, prompt_tokens, past_key_values=None, use_cache=True
     )
     first_generated_tok = sample_fn(rng, first_generated_logit[:, -1:] * 1.0 / temp, top_k, top_p)
-    past_key_values = jax.tree_map(functools.partial(_pad_to, length=prompt_len + max_len, axis=2), past_key_values)
+    past_key_values = jax.tree_util.tree_map(functools.partial(_pad_to, length=prompt_len + max_len, axis=2), past_key_values)
 
     loop_fn = functools.partial(_loop_fn, params=params, sample_fn=sample_fn, eval_fn=eval_fn,
                                 top_k=top_k, top_p=top_p, temp=temp)

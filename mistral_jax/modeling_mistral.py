@@ -40,7 +40,6 @@ from t5x import partitioning as t5x_partitioning
 from t5x.examples.t5 import layers
 
 from ._generate import generate
-from .activations import ACT2FN
 from .position import RotaryEmbedding, apply_rotary_pos_emb
 from .linear import DenseGeneral
 
@@ -192,6 +191,7 @@ class MistralMLP(nn.Module):
     config: Any = None
     dtype: Any = jnp.float32
     kernel_init: Any = nn.initializers.xavier_uniform
+    act_fn: Any = jax.nn.silu
 
     def setup(self):
         if self.config is None:
@@ -226,24 +226,12 @@ class MistralMLP(nn.Module):
             with_logical_partitioning=True,
             name="down_proj",
         )
-        self.act_fn = ACT2FN[self.config.hidden_act]
 
     def __call__(self, x, training=False):
         assert (
             x.shape[-1] == self.hidden_size
         ), f"Input to MLP layers have different dimensions than the hidden dimension. Got {x.shape[-1]}"
         x = with_sharding_constraint(x, ("batch", "length", "embed"))
-        #gate = self.act_fn(
-        #    with_sharding_constraint(
-        #        self.gate_proj(x), ("batch", "length", "intermediate")
-        #    )
-        #)
-        #proj = with_sharding_constraint(
-        #    self.up_proj(x), ("batch", "length", "intermediate")
-        #)
-        #x = with_sharding_constraint(
-        #    self.down_proj(gate * proj), ("batch", "length", "embed")
-        #)
         gate = self.act_fn(self.gate_proj(x))
         proj = self.up_proj(x)
         x = self.down_proj(gate * proj)
