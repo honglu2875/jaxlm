@@ -34,14 +34,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.linen import partitioning as nn_partitioning
+from flax.linen.partitioning import param_with_axes, with_sharding_constraint
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from t5x import partitioning as t5x_partitioning
 from t5x.examples.t5 import layers
+import warnings
 
 from ._generate import generate
 from .position import RotaryEmbedding, apply_rotary_pos_emb
 from .linear import DenseGeneral
+from .types import Array
 
 """
 Notes:
@@ -108,6 +111,11 @@ def _make_sliding_window_causal_mask(
     """
     bsz, tgt_len = input_ids_shape
 
+    if tgt_len == 1 and past_key_values_length > 0:  
+        # we are likely at inferencing stage and the causal mask can be fast-tracked
+        pad_len = tgt_len + past_key_values_length - sliding_window - 1
+        return jnp.log(jnp.triu(jnp.ones((1, tgt_len + past_key_values_length)), k=pad_len))
+
     tensor = jnp.ones(
         (tgt_len, tgt_len),
     )
@@ -141,8 +149,6 @@ def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = N
     return jnp.where(expanded_mask == 0, jnp.finfo(dtype).min, 0.0).astype(dtype)
 
 
-param_with_axes = nn_partitioning.param_with_axes
-with_sharding_constraint = nn_partitioning.with_sharding_constraint
 
 
 class MistralRMSNorm(nn.Module):
@@ -175,16 +181,16 @@ class MistralRMSNorm(nn.Module):
 def repeat_kv(hidden_states: jnp.ndarray, n_rep: int) -> jnp.ndarray:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    seqlen, num_key_value_heads, head_dim) to (batch, seqlen, num_attention_heads, head_dim)
     """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    batch, slen, num_key_value_heads, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
     hidden_states = jnp.broadcast_to(
-        hidden_states[:, :, None, :, :],
-        (batch, num_key_value_heads, n_rep, slen, head_dim),
+        hidden_states[:, :, :, None, :],
+        (batch, slen, num_key_value_heads, n_rep, head_dim),
     )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, slen, num_key_value_heads * n_rep, head_dim)
 
 
 class MistralMLP(nn.Module):
@@ -224,6 +230,7 @@ class MistralMLP(nn.Module):
             kernel_init=self.kernel_init,
             kernel_init_args=(),
             with_logical_partitioning=True,
+            kernel_axes=("intermediate", "embed"),
             name="down_proj",
         )
 
@@ -246,6 +253,10 @@ class MistralAttention(nn.Module):
     config: Any = None
     dtype: Any = jnp.float32
     kernel_init: Any = nn.initializers.xavier_uniform
+    kernel_init_args: tuple = ()
+    with_logical_partitioning: bool = True
+    weight_dtype: Any = jnp.float32
+    fused_qkv: bool = False
 
     def setup(self):
         if self.config is None:
@@ -264,33 +275,33 @@ class MistralAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        # input dim supposed to be self.hidden_size
-        self.q_proj = DenseGeneral(
-            features=self.num_heads * self.head_dim,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_init_args=(),
-            with_logical_partitioning=True,
-            name="q_proj",
-        )
-        self.k_proj = DenseGeneral(
-            features=self.num_key_value_heads * self.head_dim,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_init_args=(),
-            with_logical_partitioning=True,
-            kernel_axes=("embed", "joined_kv"),
-            name="k_proj",
-        )
-        self.v_proj = DenseGeneral(
-            features=self.num_key_value_heads * self.head_dim,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_init_args=(),
-            with_logical_partitioning=True,
-            kernel_axes=("embed", "joined_kv"),
-            name="v_proj",
-        )
+        if self.fused_qkv:
+            assert self.num_heads == self.num_key_value_heads
+            self.qkv_proj = DenseGeneral(
+                    features=(3, self.num_heads, self.head_dim),
+                    axis=-1,
+                    kernel_init=self.kernel_init,
+                    kernel_init_args=self.kernel_init_args,
+                    with_logical_partitioning=self.with_logical_partitioning,
+                    kernel_axes=("embed", "qkv", "heads", "joined_kv"),
+                    dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
+                    name="qkv_proj",
+            )
+        else:
+            self.q_proj, self.k_proj, self.v_proj = map(lambda x: DenseGeneral(
+                    features=(x[0], self.head_dim),
+                    axis=-1,
+                    kernel_init=self.kernel_init,
+                    kernel_init_args=self.kernel_init_args,
+                    with_logical_partitioning=self.with_logical_partitioning,
+                    kernel_axes=("embed","heads", "joined_kv"),
+                    dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
+                    name=x[1],
+                ),
+                ((self.num_heads, "q_proj"), (self.num_key_value_heads, "k_proj"), (self.num_key_value_heads, "v_proj")),
+            )
         self.o_proj = DenseGeneral(
             features=self.hidden_size,
             dtype=self.dtype,
@@ -306,6 +317,15 @@ class MistralAttention(nn.Module):
             max_length=self.max_position_embeddings,
             base=self.rope_theta,
         )
+
+    def qkv_proj(self, hidden: Array):
+        if self.fused_qkv:
+            out = self.qkv_proj(hidden)
+            query, key, value = out[:, :, 0], out[:, :, 1], out[:, :, 2]
+        else:
+            query, key, value = self.q_proj(hidden), self.k_proj(hidden), self.v_proj(hidden)
+
+        return query, key, value
 
     @jax.jit
     def _shape(self, tensor: jnp.ndarray, seq_len: int, bsz: int):
@@ -328,34 +348,12 @@ class MistralAttention(nn.Module):
             hidden_states.shape[-1] == self.hidden_size
         ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
-        #hidden_states = with_sharding_constraint(
-        #    hidden_states, ("batch", "length", "embed")
-        #)
 
         # Obtain q, k, v from the current hidden state and shard q only (k, v will be handled later)
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states, key_states, value_states = self.qkv_proj(hidden_states)  # bsz, seq, n_head, head_dim
 
-        query_states = jnp.swapaxes(
-            query_states.reshape(bsz, q_len, self.num_heads, self.head_dim), 1, 2
-        )
-        key_states = jnp.swapaxes(
-            key_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim),
-            1,
-            2,
-        )
-        value_states = jnp.swapaxes(
-            value_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim),
-            1,
-            2,
-        )
-        #query_states = with_sharding_constraint(
-        #    query_states, ("batch", "heads", "length", "kv")
-        #)
-
-        past_kv_length = past_key_value[0].shape[-2] if past_key_value is not None else 0
-        kv_seq_len = key_states.shape[-2] + past_kv_length
+        past_kv_length = past_key_value[0].shape[-3] if past_key_value is not None else 0
+        kv_seq_len = key_states.shape[-3] + past_kv_length
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         query_states, key_states = apply_rotary_pos_emb(
@@ -367,35 +365,22 @@ class MistralAttention(nn.Module):
                 len(past_key_value) == 2
             ), "past_key_value should be a tuple of (k, v)"
             past_key, past_value = past_key_value
-            key_states = jnp.concatenate([past_key, key_states], axis=2)
-            value_states = jnp.concatenate([past_value, value_states], axis=2)
-        #key_states = with_sharding_constraint(
-        #    key_states, ("batch", "heads", "kv_length", "kv")
-        #)
-        #value_states = with_sharding_constraint(
-        #    value_states, ("batch", "heads", "kv_length", "kv")
-        #)
+            key_states = jnp.concatenate([past_key, key_states], axis=1)
+            value_states = jnp.concatenate([past_value, value_states], axis=1)
 
-        past_key_value = (key_states, value_states) if use_cache else None
+        if use_cache:
+            past_key_value = (key_states, value_states)
+        else:
+            past_key_value = None
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        #key_states = with_sharding_constraint(
-        #    key_states, ("batch", "heads", "kv_length", "kv")
-        #)
-        #value_states = with_sharding_constraint(
-        #    value_states, ("batch", "heads", "kv_length", "kv")
-        #)
-
-        attn_weights = (query_states @ jnp.swapaxes(key_states, 2, 3)) / jnp.sqrt(
+        attn_weights = jnp.einsum('bshn,bthn->bhst', query_states, key_states) / jnp.sqrt(
             self.head_dim
         )
 
-        #attn_weights = with_sharding_constraint(
-        #    attn_weights, ("batch", "heads", "length", "kv_length")
-        #)
         _check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
         if attention_mask is not None:
@@ -406,22 +391,16 @@ class MistralAttention(nn.Module):
             hidden_states.dtype
         )
 
-        #attn_output = with_sharding_constraint(
-        #    attn_weights @ value_states, ("batch", "heads", "length", "kv")
-        #)
-        attn_output = attn_weights @ value_states
-        _check_shape(attn_output, bsz, self.num_heads, q_len, self.head_dim)
+        attn_output = jnp.einsum("bhst,bthn->bshn", attn_weights, value_states)
+        _check_shape(attn_output, bsz, q_len, self.num_heads, self.head_dim)
 
-        attn_output = jnp.swapaxes(attn_output, 1, 2)
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, -1)
 
-        #attn_output = with_sharding_constraint(
-        #    self.o_proj(attn_output), ("batch", "length", "embed")
-        #)
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
+
         return attn_output, attn_weights, past_key_value
 
 
@@ -579,7 +558,7 @@ class MistralModel(nn.Module):
 
         batch_size, seq_length = input_ids.shape
 
-        past_key_values_length = 0 if past_key_values is None else past_key_values[0][0].shape[2]
+        past_key_values_length = 0 if past_key_values is None else past_key_values[0][0].shape[1]
 
         padding_mask = None
 
@@ -690,6 +669,14 @@ class MistralForCausalLM(nn.Module):
 
         return tuple(mesh_layout)
 
+    def _shard_params(self, x, y):
+        if x.ndim != len(y.spec):
+            assert x.ndim == 2 and len(y.spec) == 3, f"The shape of x ({x.shape}) and the sharding spec ({y.spec}) does not match"
+            warnings.warn(f"The parameter has 2 axis ({x.shape}) while the sharding spec ({y.spec}) has 3 axis. "
+                    "Attempting to reshape into [:, :, head_dim], but please confirm that this is the intended behavior.")
+            return jax.device_put(x.reshape((x.shape[0], -1, self.config.hidden_size // self.config.num_attention_heads)), y)
+        return jax.device_put(x, y),
+
     def get_params(self, device_mesh_layout=(1, None), weights=None):
         """
         Get the properly sharded parameters.
@@ -745,7 +732,7 @@ class MistralForCausalLM(nn.Module):
                 if self.sharded:
                     params = {
                         "params": jax.tree_util.tree_map(
-                            lambda x, y: jax.device_put(x, y),
+                            self._shard_params,
                             weights["params"],
                             logical_state_sharding["params"],
                         )
@@ -814,9 +801,6 @@ class MistralForCausalLM(nn.Module):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
-        #logits = with_sharding_constraint(
-        #    self.lm_head(outputs.last_hidden_state), ("batch", "length", "vocab")
-        #)
         logits = self.lm_head(outputs.last_hidden_state)
         return CausalLMOutputWithPast(
             logits=logits,
@@ -834,7 +818,7 @@ class MistralForCausalLM(nn.Module):
             assert past_key_values is not None
             assert tok.shape[1] == 1, f"When kv cache padding is enabled, only support when query seq = 1. " \
                                       f"Got {tok.shape[1]} instead."
-            past_kv_length = past_key_values[0][0].shape[2]
+            past_kv_length = past_key_values[0][0].shape[1]
 
             position_ids = jnp.arange(past_kv_length + 1) - (past_kv_length - unpadded_past_kv_length)
             attention_mask = jnp.repeat(
@@ -856,7 +840,7 @@ class MistralForCausalLM(nn.Module):
             0
         ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
         if unpadded_past_kv_length is not None:  # padding is applied: truncate the past kv back to same length
-            past_key_values = jax.tree_util.tree_map(lambda x: x[:, :, tok.shape[1]:], out.past_key_values)
+            past_key_values = jax.tree_util.tree_map(lambda x: x[:, tok.shape[1]:], out.past_key_values)
         else:
             past_key_values = out.past_key_values
         return out.logits, past_key_values

@@ -143,7 +143,7 @@ def test_get_params():
 
     inputs = model_jax.prepare_input(inputs_jax["input_ids"])
     params = model_jax.get_params(
-        weights=torch_to_jax_states(model, dtype=torch.float32)
+        weights=torch_to_jax_states(model, dtype=torch.float32, head_dim=config.hidden_size // config.num_attention_heads)
     )
     print(params)
 

@@ -51,7 +51,7 @@ def generate(
         )
 
         logits = outputs[:, -1:] * 1.0 / temp
-        #print(logits)
+
         if do_sample:
             logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
             out_tk = jax.random.categorical(key, logits)

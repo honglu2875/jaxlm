@@ -15,6 +15,7 @@
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 from .types import DType
 
 
@@ -27,8 +28,11 @@ def rotate_half(x):
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     # [seq_len, dim] -> [batch_size, seq_len, 1, head_dim]
-    cos = jnp.expand_dims(jnp.take(cos, position_ids, axis=0), axis=1)
-    sin = jnp.expand_dims(jnp.take(sin, position_ids, axis=0), axis=1)
+    cos = jnp.expand_dims(jnp.take(cos, position_ids, axis=0), axis=2)
+    sin = jnp.expand_dims(jnp.take(sin, position_ids, axis=0), axis=2)
+    #q_len, k_len = q.shape[1], k.shape[1]
+    #q_embed = (q * cos[:, -q_len:]) + (rotate_half(q) * sin[:, -q_len:])
+    #k_embed = (k * cos[:, -k_len:]) + (rotate_half(k) * sin[:, -k_len:])
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -58,13 +62,10 @@ class RotaryEmbedding(nn.Module):
             self.sin_cached = self.variable(
                 "cache", "sin_cached", lambda: jnp.sin(emb).astype(self.dtype)
             )
-            self.max_seq_len_cached = self.variable(
-                "cache", "max_seq_len_cached", lambda: self.max_length
-            )
 
 
     def get_emb(self, seq_len: int):
-        t = jnp.arange(seq_len, dtype=jnp.int32)
+        t = jnp.arange(seq_len, dtype=jnp.float32)
         freqs = jnp.einsum("i,j->ij", t, self.inv_freq.value)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = jnp.concatenate((freqs, freqs), axis=-1)

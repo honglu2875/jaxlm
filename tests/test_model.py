@@ -15,6 +15,7 @@
 
 import jax
 import jax.numpy as jnp
+import pytest        
 import torch
 from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
                           MistralModel)
@@ -22,7 +23,7 @@ from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
 from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
 from mistral_jax import MistralModel as MistralModelJax
 from mistral_jax.utils import torch_to_jax_states
-from naive_generate import generate as naive_generate
+from mistral_jax.test_utils.naive_generate import generate as naive_generate
 
 
 def _forward_pass(model, model_jax, inputs, inputs_jax):
@@ -30,7 +31,7 @@ def _forward_pass(model, model_jax, inputs, inputs_jax):
         outputs = model(**inputs, output_hidden_states=True)
 
     key = jax.random.PRNGKey(0)
-    params = torch_to_jax_states(model, dtype=torch.float32)
+    params = torch_to_jax_states(model, dtype=torch.float32, head_dim=model.config.hidden_size // model.config.num_attention_heads)
     outputs_jax = model_jax.apply(
         params,
         inputs_jax["input_ids"],
@@ -63,50 +64,48 @@ def _setup_models(model_cls, model_cls_jax, jit=True, repeat=1):
     return tokenizer, model, model_jax, inputs, inputs_jax
 
 
-def test_model():
-    tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
-        MistralModel, MistralModelJax, jit=True
-    )
-    outputs, outputs_jax, _ = _forward_pass(model, model_jax, inputs, inputs_jax)
+@pytest.mark.parametrize("with_mask", [True, False])
+def test_model(with_mask: bool):
+    # If not computed on CPU, the difference between pytorch is fairly large.
+    with jax.default_device(jax.devices("cpu")[0]):
+        tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
+            MistralModel, MistralModelJax, jit=False
+        )
+        if with_mask:
+            # With attention mask
+            inputs = {
+                **inputs,
+                "attention_mask": torch.tensor([[0, 0, 0, 1, 1, 1, 1]], dtype=torch.int32),
+            }
+            inputs_jax = {
+                **inputs_jax,
+                "attention_mask": jax.numpy.array(
+                    [[0, 0, 0, 1, 1, 1, 1]],
+                    dtype=jax.numpy.int32,
+                ),
+            }
+        outputs, outputs_jax, _ = _forward_pass(model, model_jax, inputs, inputs_jax)
 
-    for i in range(len(outputs.hidden_states)):
-        hidden = outputs.hidden_states[i].numpy()
-        hidden_jax = outputs_jax[0].hidden_states[i]
-        print(jnp.max(jnp.abs(hidden - hidden_jax)))
-        print(jnp.mean(jnp.abs(hidden_jax)))
-        # todo: after a while with new versions of everything, precisions don't work any more... fix it?
-        assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-1)
-
-    # With attention mask
-    inputs = {
-        **inputs,
-        "attention_mask": torch.tensor([[1, 1, 1, 0, 0, 0, 0]], dtype=torch.int32),
-    }
-    inputs_jax = {
-        **inputs_jax,
-        "attention_mask": jax.numpy.array(
-            [[1, 1, 1, 0, 0, 0, 0]],
-            dtype=jax.numpy.int32,
-        ),
-    }
-
-    outputs, outputs_jax, _ = _forward_pass(model, model_jax, inputs, inputs_jax)
-
-    for i in range(len(outputs.hidden_states)):
-        hidden = outputs.hidden_states[i].numpy()
-        hidden_jax = outputs_jax[0].hidden_states[i]
-        print(jnp.max(jnp.abs(hidden - hidden_jax)))
-        # todo: after a while with new versions of everything, precisions don't work any more... fix it?
-        assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-1)
+        for i in range(len(outputs.hidden_states)):
+            hidden = outputs.hidden_states[i].numpy()
+            hidden_jax = outputs_jax[0].hidden_states[i]
+            if with_mask:
+                hidden = hidden[:, -4:]
+                hidden_jax = hidden_jax[:, -4:]
+            print(jnp.max(jnp.abs(hidden - hidden_jax)))
+            print(jnp.mean(jnp.abs(hidden_jax)))
+            # todo: after a while with new versions of everything, precisions don't work any more... fix it?
+            assert jax.numpy.allclose(hidden, hidden_jax, atol=1e-5)
 
 
 def test_generate():
-    tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
-        MistralForCausalLM, MistralForCausalLMJax, repeat=4,
-    )
-    outputs, outputs_jax, params = _forward_pass(model, model_jax, inputs, inputs_jax)
-
-    assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-3)
+    with jax.default_device(jax.devices("cpu")[0]):
+        tokenizer, model, model_jax, inputs, inputs_jax = _setup_models(
+            MistralForCausalLM, MistralForCausalLMJax, repeat=2, jit=True
+        )
+        outputs, outputs_jax, params = _forward_pass(model, model_jax, inputs, inputs_jax)
+        print((outputs.logits.numpy() - outputs_jax[0].logits).max())
+        assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-5)
 
     # make sure do_sample works and compare to a naive high-latency implementation
     def eval_fn(params, tok, past_key_values=None, use_cache=True) -> tuple:
@@ -126,12 +125,16 @@ def test_generate():
     )
     naive_out = naive_generate(params, eval_fn, inputs_jax["input_ids"], do_sample=True, max_len=20,)
     assert jnp.all(out_jax == naive_out)
-
+    
     # compare do_sample=False with reference impl
     with torch.no_grad():
         out = model.generate(inputs["input_ids"], do_sample=False, max_new_tokens=10)
     out_jax = model_jax.generate(
         params, inputs_jax["input_ids"], do_sample=False, max_length=10
     )
+    #out_jax = naive_generate(params, eval_fn, inputs_jax["input_ids"], do_sample=False, max_len=10)
+    outout_jax = naive_generate(params, eval_fn, out_jax[:, :9], do_sample=False, max_len=8)
+    #print(out, out_jax)
+    #print(outout_jax)
 
     assert jnp.all(out.numpy() == out_jax)

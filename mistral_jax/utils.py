@@ -21,7 +21,7 @@ from typing import Callable
 
 
 def torch_to_jax_states(
-    input: torch.nn.Module | dict, dtype: str | torch.dtype = torch.float16
+    input: torch.nn.Module | dict, dtype: str | torch.dtype = torch.float16, head_dim: int | None = None
 ):
     """
     Converts the states of a PyTorch model to JAX states.
@@ -45,6 +45,10 @@ def torch_to_jax_states(
     jax_states = {"params": {}}
 
     _dense_key_map = {"weight": ("kernel", lambda x: x.T)}
+    if head_dim is None:
+        _qkv_separate_map = _dense_key_map
+    else:
+        _qkv_separate_map = {"weight": ("kernel", lambda x: x.T.reshape(x.shape[1], -1, head_dim))}
     _emb_key_map = {"weight": ("embedding", lambda x: x)}
     _exclude_keys = {"post_attention_layernorm", "input_layernorm", "norm"}
 
@@ -62,7 +66,12 @@ def torch_to_jax_states(
         if split[-2] in _exclude_keys:
             _key_map = {}
         else:
-            _key_map = _emb_key_map if "embed_tokens" in split else _dense_key_map
+            if "embed_tokens" in split:
+                _key_map = _emb_key_map
+            elif any(k in split for k in ["q_proj", "k_proj", "v_proj"]):
+                _key_map = _qkv_separate_map
+            else:
+                _key_map = _dense_key_map
 
         if split[-1] in _key_map:
             split[-1], func = _key_map[split[-1]]
