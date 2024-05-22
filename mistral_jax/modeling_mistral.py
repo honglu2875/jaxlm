@@ -45,6 +45,9 @@ from ._generate import generate
 from .position import RotaryEmbedding, apply_rotary_pos_emb
 from .linear import DenseGeneral
 from .types import Array
+from .outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from .utils import check_shape
+from .attention import Attention
 
 """
 Notes:
@@ -55,27 +58,6 @@ Putting this note out there to say that it's not my fault for this code. For any
 of refactoring. I have already cleaned up some mess from the insane Hugging Face `modeling_mistral.py` and
 hopefully things are not too difficult from here.
 """
-
-
-@flax.struct.dataclass
-class BaseModelOutputWithPast:
-    last_hidden_state: jnp.ndarray
-    past_key_values: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
-    hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
-    attentions: Optional[Tuple[jnp.ndarray, ...]] = None
-
-
-@flax.struct.dataclass
-class CausalLMOutputWithPast:
-    logits: jnp.ndarray
-    past_key_values: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
-    hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
-    attentions: Optional[Tuple[jnp.ndarray, ...]] = None
-
-
-def _check_shape(tensor, *shape):
-    chex.assert_shape(tensor, shape)
-
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 @jax.jit
@@ -147,8 +129,6 @@ def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = N
     ).astype(dtype)
 
     return jnp.where(expanded_mask == 0, jnp.finfo(dtype).min, 0.0).astype(dtype)
-
-
 
 
 class MistralRMSNorm(nn.Module):
@@ -245,19 +225,7 @@ class MistralMLP(nn.Module):
         return x
 
 
-class MistralAttention(nn.Module):
-    """
-    Flax implementation of attention.
-    """
-
-    config: Any = None
-    dtype: Any = jnp.float32
-    kernel_init: Any = nn.initializers.xavier_uniform
-    kernel_init_args: tuple = ()
-    with_logical_partitioning: bool = True
-    weight_dtype: Any = jnp.float32
-    fused_qkv: bool = False
-
+class MistralAttention(Attention):
     def setup(self):
         if self.config is None:
             raise ValueError("Must provide a config for attention.")
@@ -269,48 +237,14 @@ class MistralAttention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = self.config.max_position_embeddings
         self.rope_theta = self.config.rope_theta
+        if self.fused_qkv:
+            assert self.num_heads == self.num_key_value_heads
+
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-
-        if self.fused_qkv:
-            assert self.num_heads == self.num_key_value_heads
-            self.qkv_proj = DenseGeneral(
-                    features=(3, self.num_heads, self.head_dim),
-                    axis=-1,
-                    kernel_init=self.kernel_init,
-                    kernel_init_args=self.kernel_init_args,
-                    with_logical_partitioning=self.with_logical_partitioning,
-                    kernel_axes=("embed", "qkv", "heads", "joined_kv"),
-                    dtype=self.dtype,
-                    weight_dtype=self.weight_dtype,
-                    name="qkv_proj",
-            )
-        else:
-            self.q_proj, self.k_proj, self.v_proj = map(lambda x: DenseGeneral(
-                    features=(x[0], self.head_dim),
-                    axis=-1,
-                    kernel_init=self.kernel_init,
-                    kernel_init_args=self.kernel_init_args,
-                    with_logical_partitioning=self.with_logical_partitioning,
-                    kernel_axes=("embed","heads", "joined_kv"),
-                    dtype=self.dtype,
-                    weight_dtype=self.weight_dtype,
-                    name=x[1],
-                ),
-                ((self.num_heads, "q_proj"), (self.num_key_value_heads, "k_proj"), (self.num_key_value_heads, "v_proj")),
-            )
-        self.o_proj = DenseGeneral(
-            features=self.hidden_size,
-            dtype=self.dtype,
-            kernel_init=self.kernel_init,
-            kernel_init_args=(),
-            with_logical_partitioning=True,
-            kernel_axes=("joined_kv", "embed"),
-            name="o_proj",
-        )
 
         self.rotary_emb = RotaryEmbedding(
             dim=self.head_dim,
@@ -318,20 +252,7 @@ class MistralAttention(nn.Module):
             base=self.rope_theta,
         )
 
-    def qkv_proj(self, hidden: Array):
-        if self.fused_qkv:
-            out = self.qkv_proj(hidden)
-            query, key, value = out[:, :, 0], out[:, :, 1], out[:, :, 2]
-        else:
-            query, key, value = self.q_proj(hidden), self.k_proj(hidden), self.v_proj(hidden)
-
-        return query, key, value
-
-    @jax.jit
-    def _shape(self, tensor: jnp.ndarray, seq_len: int, bsz: int):
-        return jnp.swapaxes(
-            tensor.reshape(bsz, seq_len, self.num_heads, self.head_dim), 1, 2
-        )
+        super().setup()
 
     def __call__(
         self,
@@ -381,10 +302,10 @@ class MistralAttention(nn.Module):
             self.head_dim
         )
 
-        _check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
+        check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
         if attention_mask is not None:
-            _check_shape(attention_mask, bsz, 1, q_len, kv_seq_len)
+            check_shape(attention_mask, bsz, 1, q_len, kv_seq_len)
             attn_weights = attn_weights + attention_mask
 
         attn_weights = jax.nn.softmax(attn_weights.astype(jnp.float32), axis=-1).astype(
@@ -392,7 +313,7 @@ class MistralAttention(nn.Module):
         )
 
         attn_output = jnp.einsum("bhst,bthn->bshn", attn_weights, value_states)
-        _check_shape(attn_output, bsz, q_len, self.num_heads, self.head_dim)
+        check_shape(attn_output, bsz, q_len, self.num_heads, self.head_dim)
 
         attn_output = attn_output.reshape(bsz, q_len, -1)
 

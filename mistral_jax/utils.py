@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import chex
 import numpy as np
 import orbax
 import torch
@@ -97,3 +97,5 @@ def load(path="tmp/", item=None):
     return orbax_checkpointer.restore(path, item=item)
 
 
+def check_shape(tensor, *shape):
+    chex.assert_shape(tensor, shape)
