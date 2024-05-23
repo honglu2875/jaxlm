@@ -30,8 +30,8 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from t5x import partitioning
 from transformers import AutoTokenizer, MistralConfig, MistralForCausalLM
 
-from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
-from mistral_jax.utils import load, save, torch_to_jax_states
+from jaxlm import MistralForCausalLM as MistralForCausalLMJax
+from jaxlm.utils import load, save, torch_to_jax_states
 
 num_devices = jax.device_count()
 device_mesh = mesh_utils.create_device_mesh((2, num_devices // 2))

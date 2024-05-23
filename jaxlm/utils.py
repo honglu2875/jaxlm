@@ -12,16 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Callable
+
 import chex
 import numpy as np
 import orbax
 import torch
+
 from .types import Array, DType, PRNGKey, Shape
-from typing import Callable
 
 
 def torch_to_jax_states(
-    input: torch.nn.Module | dict, dtype: str | torch.dtype = torch.float16, head_dim: int | None = None
+    input: torch.nn.Module | dict,
+    dtype: str | torch.dtype = torch.float16,
+    head_dim: int | None = None,
 ):
     """
     Converts the states of a PyTorch model to JAX states.
@@ -48,7 +53,9 @@ def torch_to_jax_states(
     if head_dim is None:
         _qkv_separate_map = _dense_key_map
     else:
-        _qkv_separate_map = {"weight": ("kernel", lambda x: x.T.reshape(x.shape[1], -1, head_dim))}
+        _qkv_separate_map = {
+            "weight": ("kernel", lambda x: x.T.reshape(x.shape[1], -1, head_dim))
+        }
     _emb_key_map = {"weight": ("embedding", lambda x: x)}
     _exclude_keys = {"post_attention_layernorm", "input_layernorm", "norm"}
 

@@ -21,9 +21,9 @@
 
 from typing import Any, Sequence
 
-from flax.linen import partitioning
 import jax
 import jax.numpy as jnp
+from flax.linen import partitioning
 
 Config = Any
 
@@ -41,4 +41,3 @@ BATCH = "activation_batch"
 LENGTH = "activation_length"
 HEAD = "activation_heads"
 D_KV = "activation_kv"
-

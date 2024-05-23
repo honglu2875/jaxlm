@@ -3,7 +3,7 @@ import functools
 import jax
 import jax.numpy as jnp
 
-from mistral_jax._generate import top_k_top_p_filtering
+from .._generate import top_k_top_p_filtering
 
 
 def generate(
@@ -47,7 +47,10 @@ def generate(
         else:
             tok = current_state[:, -1:]
         outputs, past_key_values = eval_fn(
-            params, tok, past_key_values=past_key_values, use_cache=True,
+            params,
+            tok,
+            past_key_values=past_key_values,
+            use_cache=True,
         )
 
         logits = outputs[:, -1:] * 1.0 / temp

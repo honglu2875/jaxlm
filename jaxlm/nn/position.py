@@ -12,11 +12,12 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from flax import linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from .types import DType
+from flax import linen as nn
+
+from ..types import DType
 
 
 def rotate_half(x):
@@ -30,9 +31,9 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     # [seq_len, dim] -> [batch_size, seq_len, 1, head_dim]
     cos = jnp.expand_dims(jnp.take(cos, position_ids, axis=0), axis=2)
     sin = jnp.expand_dims(jnp.take(sin, position_ids, axis=0), axis=2)
-    #q_len, k_len = q.shape[1], k.shape[1]
-    #q_embed = (q * cos[:, -q_len:]) + (rotate_half(q) * sin[:, -q_len:])
-    #k_embed = (k * cos[:, -k_len:]) + (rotate_half(k) * sin[:, -k_len:])
+    # q_len, k_len = q.shape[1], k.shape[1]
+    # q_embed = (q * cos[:, -q_len:]) + (rotate_half(q) * sin[:, -q_len:])
+    # k_embed = (k * cos[:, -k_len:]) + (rotate_half(k) * sin[:, -k_len:])
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -63,14 +64,12 @@ class RotaryEmbedding(nn.Module):
                 "cache", "sin_cached", lambda: jnp.sin(emb).astype(self.dtype)
             )
 
-
     def get_emb(self, seq_len: int):
         t = jnp.arange(seq_len, dtype=jnp.float32)
         freqs = jnp.einsum("i,j->ij", t, self.inv_freq.value)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = jnp.concatenate((freqs, freqs), axis=-1)
         return emb
-
 
     def __call__(self, x: jnp.ndarray, seq_len=None):
         # x: [bs, seq_len, num_attention_heads, head_size]
@@ -86,4 +85,3 @@ class RotaryEmbedding(nn.Module):
             self.cos_cached.value[:seq_len].astype(x.dtype),
             self.sin_cached.value[:seq_len].astype(x.dtype),
         )
-

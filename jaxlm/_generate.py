@@ -77,22 +77,31 @@ def top_k_top_p_filtering(
 
 @functools.partial(jax.jit, static_argnames=("top_k", "top_p"))
 def sample_with_tk_tp(rng, logits, top_k, top_p):
-    return jax.random.categorical(rng,
-                                  top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p))
+    return jax.random.categorical(
+        rng, top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+    )
 
 
 @functools.partial(jax.jit, static_argnames=("length", "axis"))
 def _pad_to(x, length, axis=0):
-    pad_shape = x.shape[:axis] + (length - x.shape[axis],) + x.shape[axis + 1:]
+    pad_shape = x.shape[:axis] + (length - x.shape[axis],) + x.shape[axis + 1 :]
     return jnp.concatenate((jnp.zeros(pad_shape), x), axis=axis)
 
 
-@functools.partial(jax.jit, static_argnames=("sample_fn", "eval_fn", "top_k", "top_p", "temp"))
-def _loop_fn(past_kv_and_rng_and_out, i, params, sample_fn, eval_fn, top_k, top_p, temp):
+@functools.partial(
+    jax.jit, static_argnames=("sample_fn", "eval_fn", "top_k", "top_p", "temp")
+)
+def _loop_fn(
+    past_kv_and_rng_and_out, i, params, sample_fn, eval_fn, top_k, top_p, temp
+):
     past_key_values, key, tok = past_kv_and_rng_and_out
     key, subkey = jax.random.split(key)
     outputs, past_key_values = eval_fn(
-        params, tok, past_key_values=past_key_values, use_cache=True, unpadded_past_kv_length=i
+        params,
+        tok,
+        past_key_values=past_key_values,
+        use_cache=True,
+        unpadded_past_kv_length=i,
     )
     logits = outputs[:, -1:] / temp
     out_tk = sample_fn(key, logits, top_k, top_p)
@@ -141,20 +150,34 @@ def generate(
         sample_fn = lambda rng, logits, *args: jnp.argmax(logits, axis=-1)
 
     first_generated_logit, past_key_values = eval_fn(
-            params, prompt_tokens, past_key_values=None, use_cache=True
+        params, prompt_tokens, past_key_values=None, use_cache=True
     )
-    first_generated_tok = sample_fn(rng, first_generated_logit[:, -1:] * 1.0 / temp, top_k, top_p)
-    past_key_values = jax.tree_util.tree_map(functools.partial(_pad_to, length=prompt_len + max_len, axis=1), past_key_values)
+    first_generated_tok = sample_fn(
+        rng, first_generated_logit[:, -1:] * 1.0 / temp, top_k, top_p
+    )
+    past_key_values = jax.tree_util.tree_map(
+        functools.partial(_pad_to, length=prompt_len + max_len, axis=1), past_key_values
+    )
 
-    loop_fn = functools.partial(_loop_fn, params=params, sample_fn=sample_fn, eval_fn=eval_fn,
-                                top_k=top_k, top_p=top_p, temp=temp)
+    loop_fn = functools.partial(
+        _loop_fn,
+        params=params,
+        sample_fn=sample_fn,
+        eval_fn=eval_fn,
+        top_k=top_k,
+        top_p=top_p,
+        temp=temp,
+    )
 
-    generated_toks = jax.lax.scan(loop_fn,
-                                  (past_key_values, rng, first_generated_tok),
-                                  jnp.arange(max_len - 1) + prompt_len,
-                                  )[1].T
+    generated_toks = jax.lax.scan(
+        loop_fn,
+        (past_key_values, rng, first_generated_tok),
+        jnp.arange(max_len - 1) + prompt_len,
+    )[1].T
 
     if generation_only:
         return jnp.concatenate((first_generated_tok, generated_toks), axis=-1)
     else:
-        return jnp.concatenate((prompt_tokens, first_generated_tok, generated_toks), axis=-1)
+        return jnp.concatenate(
+            (prompt_tokens, first_generated_tok, generated_toks), axis=-1
+        )

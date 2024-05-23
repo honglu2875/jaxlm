@@ -20,10 +20,10 @@ import torch
 from transformers import (AutoTokenizer, MistralConfig, MistralForCausalLM,
                           MistralModel)
 
-from mistral_jax import MistralForCausalLM as MistralForCausalLMJax
-from mistral_jax import MistralModel as MistralModelJax
-from mistral_jax.utils import torch_to_jax_states
-from mistral_jax.test_utils.naive_generate import generate as naive_generate
+from jaxlm import MistralForCausalLM as MistralForCausalLMJax
+from jaxlm import MistralModel as MistralModelJax
+from jaxlm.utils import torch_to_jax_states
+from jaxlm.test_utils.naive_generate import generate as naive_generate
 
 
 def _forward_pass(model, model_jax, inputs, inputs_jax):

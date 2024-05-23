@@ -8,7 +8,7 @@ dependencies = {file = ["requirements.txt"]}
 [tool.setuptools_scm]
 
 [project]
-name = "mistral-jax"
+name = "jaxlm"
 description = ""
 authors = [{name = "Honglu Fan"}]
 readme = "README.md"

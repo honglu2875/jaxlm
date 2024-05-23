@@ -24,6 +24,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import functools
+import warnings
 from functools import partial
 from typing import Any, List, Optional, Tuple
 
@@ -39,15 +40,15 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from t5x import partitioning as t5x_partitioning
 from t5x.examples.t5 import layers
-import warnings
 
-from ._generate import generate
-from .position import RotaryEmbedding, apply_rotary_pos_emb
-from .linear import DenseGeneral
-from .types import Array
-from .outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from .utils import check_shape
-from .attention import Attention
+from .._generate import generate
+from ..nn.attention import Attention
+from ..nn.linear import DenseGeneral
+from ..nn.norms import RMSNorm
+from ..outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from ..nn.position import RotaryEmbedding, apply_rotary_pos_emb
+from ..types import Array
+from ..utils import check_shape
 
 """
 Notes:
@@ -58,6 +59,7 @@ Putting this note out there to say that it's not my fault for this code. For any
 of refactoring. I have already cleaned up some mess from the insane Hugging Face `modeling_mistral.py` and
 hopefully things are not too difficult from here.
 """
+
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 @jax.jit
@@ -93,10 +95,12 @@ def _make_sliding_window_causal_mask(
     """
     bsz, tgt_len = input_ids_shape
 
-    if tgt_len == 1 and past_key_values_length > 0:  
+    if tgt_len == 1 and past_key_values_length > 0:
         # we are likely at inferencing stage and the causal mask can be fast-tracked
         pad_len = tgt_len + past_key_values_length - sliding_window - 1
-        return jnp.log(jnp.triu(jnp.ones((1, tgt_len + past_key_values_length)), k=pad_len))
+        return jnp.log(
+            jnp.triu(jnp.ones((1, tgt_len + past_key_values_length)), k=pad_len)
+        )
 
     tensor = jnp.ones(
         (tgt_len, tgt_len),
@@ -129,33 +133,6 @@ def _expand_mask(mask: jnp.ndarray, dtype: jnp.dtype, tgt_len: Optional[int] = N
     ).astype(dtype)
 
     return jnp.where(expanded_mask == 0, jnp.finfo(dtype).min, 0.0).astype(dtype)
-
-
-class MistralRMSNorm(nn.Module):
-    hidden_size: int
-    eps: float = 1e-6
-
-    def setup(self):
-        """
-        MistralRMSNorm is equivalent to T5LayerNorm
-        """
-        self.weight = param_with_axes(
-            "weight",
-            nn.with_logical_partitioning(
-                lambda _, shape, dtype: jnp.ones(shape, dtype=dtype), ("embed",)
-            ),
-            (self.hidden_size,),
-            jnp.float32,
-            axes=("embed",),
-        )
-        self.variance_epsilon = self.eps
-
-    def __call__(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.astype(jnp.float32)
-        variance = jnp.square(hidden_states).mean(-1, keepdims=True)
-        hidden_states = hidden_states / jnp.sqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.astype(input_dtype)
 
 
 def repeat_kv(hidden_states: jnp.ndarray, n_rep: int) -> jnp.ndarray:
@@ -271,9 +248,13 @@ class MistralAttention(Attention):
         bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
 
         # Obtain q, k, v from the current hidden state and shard q only (k, v will be handled later)
-        query_states, key_states, value_states = self.qkv_proj(hidden_states)  # bsz, seq, n_head, head_dim
+        query_states, key_states, value_states = self.qkv_proj(
+            hidden_states
+        )  # bsz, seq, n_head, head_dim
 
-        past_kv_length = past_key_value[0].shape[-3] if past_key_value is not None else 0
+        past_kv_length = (
+            past_key_value[0].shape[-3] if past_key_value is not None else 0
+        )
         kv_seq_len = key_states.shape[-3] + past_kv_length
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
@@ -298,9 +279,9 @@ class MistralAttention(Attention):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = jnp.einsum('bshn,bthn->bhst', query_states, key_states) / jnp.sqrt(
-            self.head_dim
-        )
+        attn_weights = jnp.einsum(
+            "bshn,bthn->bhst", query_states, key_states
+        ) / jnp.sqrt(self.head_dim)
 
         check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
@@ -338,10 +319,10 @@ class MistralDecoderLayer(nn.Module):
         self.mlp = MistralMLP(
             config=self.config, dtype=self.dtype, kernel_init=self.kernel_init
         )
-        self.input_layernorm = MistralRMSNorm(
+        self.input_layernorm = RMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
-        self.post_attention_layernorm = MistralRMSNorm(
+        self.post_attention_layernorm = RMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
 
@@ -427,9 +408,7 @@ class MistralModel(nn.Module):
             )
             for _ in range(self.config.num_hidden_layers)
         ]
-        self.norm = MistralRMSNorm(
-            self.config.hidden_size, eps=self.config.rms_norm_eps
-        )
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
     @staticmethod
     def _prepare_decoder_attention_mask(
@@ -479,21 +458,28 @@ class MistralModel(nn.Module):
 
         batch_size, seq_length = input_ids.shape
 
-        past_key_values_length = 0 if past_key_values is None else past_key_values[0][0].shape[1]
+        past_key_values_length = (
+            0 if past_key_values is None else past_key_values[0][0].shape[1]
+        )
 
         padding_mask = None
 
         # embed positions
         if attention_mask is None:
-            attention_mask = jnp.ones((batch_size, seq_length + past_key_values_length), dtype=bool)
+            attention_mask = jnp.ones(
+                (batch_size, seq_length + past_key_values_length), dtype=bool
+            )
         else:
             padding_mask = attention_mask
 
         if position_ids is None:
-            position_ids = jnp.arange(
+            position_ids = (
+                jnp.arange(
                     seq_length + past_key_values_length,
                     dtype=jnp.int32,
-            )[None] - (~attention_mask[0, :-seq_length]).sum()
+                )[None]
+                - (~attention_mask[0, :-seq_length]).sum()
+            )
             position_ids = jnp.where(position_ids >= 0, position_ids, 0)
 
         inputs_embeds = self.embed_tokens(input_ids).astype(self.dtype)
@@ -592,11 +578,24 @@ class MistralForCausalLM(nn.Module):
 
     def _shard_params(self, x, y):
         if x.ndim != len(y.spec):
-            assert x.ndim == 2 and len(y.spec) == 3, f"The shape of x ({x.shape}) and the sharding spec ({y.spec}) does not match"
-            warnings.warn(f"The parameter has 2 axis ({x.shape}) while the sharding spec ({y.spec}) has 3 axis. "
-                    "Attempting to reshape into [:, :, head_dim], but please confirm that this is the intended behavior.")
-            return jax.device_put(x.reshape((x.shape[0], -1, self.config.hidden_size // self.config.num_attention_heads)), y)
-        return jax.device_put(x, y),
+            assert (
+                x.ndim == 2 and len(y.spec) == 3
+            ), f"The shape of x ({x.shape}) and the sharding spec ({y.spec}) does not match"
+            warnings.warn(
+                f"The parameter has 2 axis ({x.shape}) while the sharding spec ({y.spec}) has 3 axis. "
+                "Attempting to reshape into [:, :, head_dim], but please confirm that this is the intended behavior."
+            )
+            return jax.device_put(
+                x.reshape(
+                    (
+                        x.shape[0],
+                        -1,
+                        self.config.hidden_size // self.config.num_attention_heads,
+                    )
+                ),
+                y,
+            )
+        return (jax.device_put(x, y),)
 
     def get_params(self, device_mesh_layout=(1, None), weights=None):
         """
@@ -731,20 +730,33 @@ class MistralForCausalLM(nn.Module):
         )
 
     def wrapped_apply_fn(
-            self, params, tok, past_key_values=None, use_cache=True,
-            unpadded_past_kv_length=None
+        self,
+        params,
+        tok,
+        past_key_values=None,
+        use_cache=True,
+        unpadded_past_kv_length=None,
     ) -> tuple[CausalLMOutputWithPast, dict]:
         tok = jnp.array(tok)
         if unpadded_past_kv_length is not None:
             assert past_key_values is not None
-            assert tok.shape[1] == 1, f"When kv cache padding is enabled, only support when query seq = 1. " \
-                                      f"Got {tok.shape[1]} instead."
+            assert tok.shape[1] == 1, (
+                f"When kv cache padding is enabled, only support when query seq = 1. "
+                f"Got {tok.shape[1]} instead."
+            )
             past_kv_length = past_key_values[0][0].shape[1]
 
-            position_ids = jnp.arange(past_kv_length + 1) - (past_kv_length - unpadded_past_kv_length)
+            position_ids = jnp.arange(past_kv_length + 1) - (
+                past_kv_length - unpadded_past_kv_length
+            )
             attention_mask = jnp.repeat(
-                (position_ids >= 0)[None], repeats=tok.shape[0], axis=0)
-            position_ids = jnp.repeat(jnp.where(position_ids >= 0, position_ids, 0)[None], repeats=tok.shape[0], axis=0)
+                (position_ids >= 0)[None], repeats=tok.shape[0], axis=0
+            )
+            position_ids = jnp.repeat(
+                jnp.where(position_ids >= 0, position_ids, 0)[None],
+                repeats=tok.shape[0],
+                axis=0,
+            )
         else:
             position_ids, attention_mask = None, None
 
@@ -760,8 +772,12 @@ class MistralForCausalLM(nn.Module):
         )[
             0
         ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
-        if unpadded_past_kv_length is not None:  # padding is applied: truncate the past kv back to same length
-            past_key_values = jax.tree_util.tree_map(lambda x: x[:, tok.shape[1]:], out.past_key_values)
+        if (
+            unpadded_past_kv_length is not None
+        ):  # padding is applied: truncate the past kv back to same length
+            past_key_values = jax.tree_util.tree_map(
+                lambda x: x[:, tok.shape[1] :], out.past_key_values
+            )
         else:
             past_key_values = out.past_key_values
         return out.logits, past_key_values

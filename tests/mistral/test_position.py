@@ -1,4 +1,4 @@
-from mistral_jax.position import RotaryEmbedding
+from jaxlm.nn.position import RotaryEmbedding
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 import torch
 import jax

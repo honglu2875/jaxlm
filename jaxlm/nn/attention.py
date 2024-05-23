@@ -17,29 +17,29 @@
 #
 # This file has been modified from its original version
 # Link: https://github.com/google/maxtext/blob/4f3a0d3cf8509d05ce040e35d88ea7bf57797945/MaxText/layers/attentions.py
-#
-import chex
+
 import functools
 import math
-from typing import Optional, Sequence, Any
+from typing import Any, Optional, Sequence
 
-from flax import linen as nn
+import chex
 import jax
-from jax import lax
-from jax import random
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from jax.experimental.shard_map import shard_map
-from jax.experimental.pallas.ops import attention as pallas_attention
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 import jax.numpy as jnp
-from .types import Array
+from flax import linen as nn
+from jax import lax, random
+from jax.experimental.pallas.ops import attention as pallas_attention
+from jax.experimental.pallas.ops.tpu.splash_attention import (
+    splash_attention_kernel, splash_attention_mask)
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
 from .linear import DenseGeneral
+from ..types import Array
 
-#from .types import Array, Config, DType, Mesh, PRNGKey, AxisNames, BATCH, LENGTH, HEAD, D_KV
+# from .types import Array, Config, DType, Mesh, PRNGKey, AxisNames, BATCH, LENGTH, HEAD, D_KV
 
 
-#DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
+# DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 
 
 '''
@@ -124,7 +124,7 @@ class FlashAttentionOp(AttentionOp):
         output = self.tpu_flash_attention(query, key, value, decoder_segment_ids=decoder_segment_ids)
         return output
 '''
-    
+
 
 class Attention(nn.Module):
     """
@@ -147,29 +147,34 @@ class Attention(nn.Module):
 
         if self.fused_qkv:
             self.qkv_proj = DenseGeneral(
-                    features=(3, self.num_heads, self.head_dim),
-                    axis=-1,
-                    kernel_init=self.kernel_init,
-                    kernel_init_args=self.kernel_init_args,
-                    with_logical_partitioning=self.with_logical_partitioning,
-                    kernel_axes=("embed", "qkv", "heads", "joined_kv"),
-                    dtype=self.dtype,
-                    weight_dtype=self.weight_dtype,
-                    name="qkv_proj",
+                features=(3, self.num_heads, self.head_dim),
+                axis=-1,
+                kernel_init=self.kernel_init,
+                kernel_init_args=self.kernel_init_args,
+                with_logical_partitioning=self.with_logical_partitioning,
+                kernel_axes=("embed", "qkv", "heads", "joined_kv"),
+                dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
+                name="qkv_proj",
             )
         else:
-            self.q_proj, self.k_proj, self.v_proj = map(lambda x: DenseGeneral(
+            self.q_proj, self.k_proj, self.v_proj = map(
+                lambda x: DenseGeneral(
                     features=(x[0], self.head_dim),
                     axis=-1,
                     kernel_init=self.kernel_init,
                     kernel_init_args=self.kernel_init_args,
                     with_logical_partitioning=self.with_logical_partitioning,
-                    kernel_axes=("embed","heads", "joined_kv"),
+                    kernel_axes=("embed", "heads", "joined_kv"),
                     dtype=self.dtype,
                     weight_dtype=self.weight_dtype,
                     name=x[1],
                 ),
-                ((self.num_heads, "q_proj"), (self.num_key_value_heads, "k_proj"), (self.num_key_value_heads, "v_proj")),
+                (
+                    (self.num_heads, "q_proj"),
+                    (self.num_key_value_heads, "k_proj"),
+                    (self.num_key_value_heads, "v_proj"),
+                ),
             )
         self.o_proj = DenseGeneral(
             features=self.head_dim * self.num_heads,
@@ -186,7 +191,11 @@ class Attention(nn.Module):
             out = self.qkv_proj(hidden)
             query, key, value = out[:, :, 0], out[:, :, 1], out[:, :, 2]
         else:
-            query, key, value = self.q_proj(hidden), self.k_proj(hidden), self.v_proj(hidden)
+            query, key, value = (
+                self.q_proj(hidden),
+                self.k_proj(hidden),
+                self.v_proj(hidden),
+            )
 
         return query, key, value
 
@@ -226,32 +235,34 @@ class FlashAttentionOp(nn.Module):
         value = jnp.transpose(value, axes=(0, 2, 1, 3))
 
         axis_names = nn.logical_to_mesh_axes(self.axis_names)
-        segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
+        segment_axis_names = nn.logical_to_mesh_axes(
+            (BATCH, "activation_length_no_heads")
+        )
 
         @functools.partial(
             shard_map,
             mesh=self.mesh,
             in_specs=(
-                #axis_names,
-                #axis_names,
-                #axis_names,
-                #segment_axis_names,
+                # axis_names,
+                # axis_names,
+                # axis_names,
+                # segment_axis_names,
                 "batch",
                 "heads",
                 "length",
-                "joined_kv"
+                "joined_kv",
             ),
-            #out_specs=axis_names,
+            # out_specs=axis_names,
             out_specs=("batch", "heads", "length", "joined_kv"),
             check_rep=False,
         )
         def wrap_flash_attention(query, key, value):
-            '''
+            """
             if decoder_segment_ids is not None:
                 assert (
                     query.shape[2] == decoder_segment_ids.q.shape[1]
                 ), "Sharding along sequence dimension not allowed in tpu kernel attention"
-            '''
+            """
             block_sizes = splash_attention_kernel.BlockSizes(
                 block_q=min(512, query.shape[2]),
                 block_kv_compute=min(512, key.shape[2]),
@@ -263,20 +274,35 @@ class FlashAttentionOp(nn.Module):
                 block_kv_dq=min(512, query.shape[2]),
             )
 
-            masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
+            masks = [
+                splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
+                for i in range(query.shape[1])
+            ]
             multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
             splash_kernel = splash_attention_kernel.make_splash_mha(
-                mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes
+                mask=multi_head_mask,
+                head_shards=1,
+                q_seq_shards=1,
+                block_sizes=block_sizes,
             )
 
-            return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
+            return jax.vmap(splash_kernel)(
+                query, key, value, segment_ids=decoder_segment_ids
+            )
 
         x = wrap_flash_attention(query, key, value, decoder_segment_ids)
         x = jnp.transpose(x, axes=(0, 2, 1, 3))
         return x
 
-    def __call__(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None = None) -> Array:
+    def __call__(
+        self,
+        query: Array,
+        key: Array,
+        value: Array,
+        decoder_segment_ids: Array | None = None,
+    ) -> Array:
         self.check_attention_inputs(query, key, value)
-        output = self.tpu_flash_attention(query, key, value, decoder_segment_ids=decoder_segment_ids)
+        output = self.tpu_flash_attention(
+            query, key, value, decoder_segment_ids=decoder_segment_ids
+        )
         return output
-

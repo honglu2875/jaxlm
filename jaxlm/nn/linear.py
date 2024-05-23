@@ -19,26 +19,27 @@
 # Link: https://github.com/google/maxtext/blob/4f3a0d3cf8509d05ce040e35d88ea7bf57797945/MaxText/layers/linears.py
 #
 
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
+
 import flax.linen as nn
 import jax
-from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from .types import PRNGKey, Array, Config, DType, Shape
-from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
+from jax import lax
 
+from ..types import Array, Config, DType, PRNGKey, Shape
 
 
 def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int]:
-  # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
-  return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
+    # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
+    return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
 
 def _canonicalize_tuple(x):
-  if isinstance(x, Iterable):
-    return tuple(x)
-  else:
-    return (x,)
+    if isinstance(x, Iterable):
+        return tuple(x)
+    else:
+        return (x,)
 
 
 class DenseGeneral(nn.Module):
@@ -65,11 +66,16 @@ class DenseGeneral(nn.Module):
 
     def setup(self):
         # wrap over init function in order to receive in_axis and out_axis
-        def init_fn(key: PRNGKey, shape: Shape, dtype: DType, in_axis: int, out_axis: int):
-            fn = self.kernel_init(*self.kernel_init_args, in_axis=in_axis, out_axis=out_axis)
+        def init_fn(
+            key: PRNGKey, shape: Shape, dtype: DType, in_axis: int, out_axis: int
+        ):
+            fn = self.kernel_init(
+                *self.kernel_init_args, in_axis=in_axis, out_axis=out_axis
+            )
             if self.with_logical_partitioning:
                 fn = nn.with_logical_partitioning(fn, self.kernel_axes)
             return fn(key, shape, dtype)
+
         self.wrapped_kernel_init = init_fn
 
     @nn.compact
@@ -86,7 +92,9 @@ class DenseGeneral(nn.Module):
         def compute_dot_general(inputs, kernel, axis, contract_ind):
             """Computes a dot_general operation."""
             dot_general = lax.dot_general
-            return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+            return dot_general(
+                inputs, kernel, ((axis, contract_ind), ((), ())), precision=None
+            )
 
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
@@ -111,7 +119,10 @@ class DenseGeneral(nn.Module):
         output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
         if self.use_bias:
-            bias_axes, bias_shape = self.kernel_axes[-len(features) :], kernel_shape[-len(features) :]
+            bias_axes, bias_shape = (
+                self.kernel_axes[-len(features) :],
+                kernel_shape[-len(features) :],
+            )
             bias = self.param(
                 "bias",
                 nn.with_logical_partitioning(bias_init, bias_axes),

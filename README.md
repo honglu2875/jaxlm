@@ -1,4 +1,14 @@
-# mistral_jax
+# jaxlm
+
+A study playground for LM components in JAX. Started off as mistral-jax implementation but plan to cover a few other major LLMs as well.
+
+
+
+
+# Old README:
+
+
+## mistral_jax
 (unofficial) Mistral model in JAX using TPU pod. Currently it is working on my GCP TPU v3-8 pods.
 
 This repo is deeply indebted to the [Google TRC program](https://sites.research.google/trc/faq/) without which
