@@ -20,17 +20,17 @@
 #
 
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
-
+from dataclasses import field
 import flax.linen as nn
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
 from ..types import Array, Config, DType, PRNGKey, Shape
+from .module import Module
 
 
-def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int]:
+def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
     # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
     return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
@@ -42,7 +42,7 @@ def _canonicalize_tuple(x):
         return (x,)
 
 
-class DenseGeneral(nn.Module):
+class DenseGeneral(Module):
     """A linear transformation with flexible axes.
 
     Attributes:
@@ -51,32 +51,21 @@ class DenseGeneral(nn.Module):
     weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
+    kernel_axes: axes names (required when with_logical_partitioning==True)
     use_bias: whether to add bias in linear transformation
+    bias_init: if use_bias==True, apply the bias_init function to initialize bias
     """
+    # Required:
+    features: Union[Iterable[int], int] = field(kw_only=True)
 
-    features: Union[Iterable[int], int]
     axis: Union[Iterable[int], int] = -1
     weight_dtype: DType = jnp.float32
     dtype: DType = jnp.float32
-    kernel_init: Callable = nn.initializers.variance_scaling
-    kernel_init_args: tuple = (1.0, "fan_in", "truncated_normal")
-    with_logical_partitioning: bool = True
+
+    # DenseGeneral: Product of Spaces over kernel_axes -> Space(features)
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
-
-    def setup(self):
-        # wrap over init function in order to receive in_axis and out_axis
-        def init_fn(
-            key: PRNGKey, shape: Shape, dtype: DType, in_axis: int, out_axis: int
-        ):
-            fn = self.kernel_init(
-                *self.kernel_init_args, in_axis=in_axis, out_axis=out_axis
-            )
-            if self.with_logical_partitioning:
-                fn = nn.with_logical_partitioning(fn, self.kernel_axes)
-            return fn(key, shape, dtype)
-
-        self.wrapped_kernel_init = init_fn
+    bias_init: Callable = nn.initializers.zeros
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
@@ -125,7 +114,7 @@ class DenseGeneral(nn.Module):
             )
             bias = self.param(
                 "bias",
-                nn.with_logical_partitioning(bias_init, bias_axes),
+                nn.with_logical_partitioning(self.bias_init, bias_axes),
                 bias_shape,
                 self.weight_dtype,
             )

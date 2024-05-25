@@ -45,6 +45,7 @@ from .._generate import generate
 from ..nn.attention import Attention
 from ..nn.linear import DenseGeneral
 from ..nn.norms import RMSNorm
+from ..nn.embedding import Embed
 from ..outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ..nn.position import RotaryEmbedding, apply_rotary_pos_emb
 from ..types import Array
@@ -388,17 +389,11 @@ class MistralModel(nn.Module):
         self.padding_idx = self.config.pad_token_id
         self.vocab_size = self.config.vocab_size
 
-        self.embed_tokens = layers.Embed(
+        self.embed_tokens = Embed(
             num_embeddings=self.vocab_size,
             features=self.config.hidden_size,
-            attend_dtype=self.dtype,
-            embedding_init=nn.with_logical_partitioning(
-                nn.initializers.normal(stddev=1.0),
-                (
-                    "vocab",
-                    "embed",
-                ),
-            ),
+            kernel_init=self.kernel_init,
+            kernel_init_args=(),
             one_hot=True,
             name="embed_tokens",
         )
