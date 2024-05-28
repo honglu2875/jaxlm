@@ -24,6 +24,7 @@ from jaxlm import MistralForCausalLM as MistralForCausalLMJax
 from jaxlm import MistralModel as MistralModelJax
 from jaxlm.utils import torch_to_jax_states
 from jaxlm.test_utils.naive_generate import generate as naive_generate
+from jaxlm.cache import KVCache
 
 
 def _forward_pass(model_jax, inputs_jax, use_cache=False):
@@ -32,11 +33,14 @@ def _forward_pass(model_jax, inputs_jax, use_cache=False):
     params = model_jax.init(
         key,
         inputs_jax["input_ids"],
-        #attention_mask=inputs_jax["attention_mask"],
-        #mutable=("cache",),
-        #output_hidden_states=True,
-        #use_cache=use_cache,
     )
+    if use_cache:
+        bs, l = inputs_jax["input_ids"].shape[:2]
+        nh, hd = model_jax.config.num_key_value_heads, model_jax.config.hidden_size // model_jax.config.num_attention_heads
+        kv_caches = [KVCache.init(bs, l + 1, nh, hd) for _ in range(model_jax.config.num_hidden_layers)]
+    else:
+        kv_caches = None
+        
     outputs_jax, _ = model_jax.apply(
         params,
         inputs_jax["input_ids"],
@@ -44,6 +48,7 @@ def _forward_pass(model_jax, inputs_jax, use_cache=False):
         mutable=("cache",),
         output_hidden_states=True,
         use_cache=use_cache,
+        kv_caches=kv_caches,
     )
     return outputs_jax, params
 
@@ -80,7 +85,7 @@ def test_kv_cache():
 
         #out, past_kv = outputs_jax
         out = outputs_jax.last_hidden_state
-        past_kv = outputs_jax.past_key_values
+        kv_caches = outputs_jax.kv_caches
 
         outputs_jax2, _ = model_jax.apply(
             params,
@@ -89,16 +94,10 @@ def test_kv_cache():
             mutable=("cache",),
             output_hidden_states=True,
             use_cache=True,
-            past_key_values=[(x[0][:, :-1], x[1][:, :-1]) for x in past_kv],
+            kv_caches=[x.replace(end_pos=x.end_pos - 1) for x in kv_caches],
         )
         out2 = outputs_jax2.last_hidden_state
-        past_kv2 = outputs_jax2.past_key_values
+        #past_kv2 = outputs_jax2.kv_caches
 
-        for (k,v), (k2,v2) in zip(past_kv, past_kv2):
-            #print(jnp.abs(k[:, :-1]-k2[:, :-1]).max())
-            #print(jnp.abs(v[:, :-1]-v2[:, :-1]).max())
-            print(jnp.abs(k-k2).max())
-            print(jnp.abs(v-v2).max())
-        print(jnp.abs(out[:, -1:] - out2).max())
         assert jnp.allclose(out[:, -1:], out2, atol=1e-5)
 

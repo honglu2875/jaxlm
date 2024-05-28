@@ -12,7 +12,7 @@ def generate(
     prompt_tokens: list | jnp.ndarray,
     do_sample: bool = True,
     seed: int = 0,
-    max_len: int = 100,
+    max_tokens: int = 100,
     top_k: int = 0,
     top_p: float = 0.0,
     temp: float = 1.0,
@@ -25,7 +25,7 @@ def generate(
         prompt_tokens: the tokenized prompt
         do_sample: whether to sample the distribution or take the argmax
         seed: random seed
-        max_len: the max generation length
+        max_tokens: the max generation length
         top_k: top k
         top_p: top p
         temp: temperature
@@ -41,7 +41,7 @@ def generate(
 
     past_key_values = None
     key = jax.random.PRNGKey(seed)
-    for _ in range(max_len):
+    for _ in range(max_tokens):
         if past_key_values is None:
             tok = current_state
         else:

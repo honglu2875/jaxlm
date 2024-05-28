@@ -168,7 +168,7 @@ def test_sharded_gen():
 
     inputs = model_jax.prepare_input(inputs_jax["input_ids"])
     params = model_jax.get_params()
-    output = model_jax.generate(params, inputs, do_sample=True, max_length=10)
+    output = model_jax.generate(params, inputs, do_sample=True, max_tokens=10, no_jit=True)
 
 
 def test_save_load():

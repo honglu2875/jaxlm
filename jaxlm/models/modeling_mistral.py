@@ -34,34 +34,24 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax.linen import partitioning as nn_partitioning
 from flax.linen.partitioning import param_with_axes, with_sharding_constraint
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from t5x import partitioning as t5x_partitioning
-from t5x.examples.t5 import layers
 
 from .._generate import generate
 from ..nn.attention import Attention
 from ..nn.linear import DenseGeneral
 from ..nn.norms import RMSNorm
 from ..nn.embedding import Embed
-from ..outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from ..outputs import BaseModelOutputWithCache, CausalLMOutputWithCache
 from ..nn.position import RotaryEmbedding, apply_rotary_pos_emb
 from ..types import Array
-from ..utils import check_shape
+from ..utils import check_shape, get_default_pos_ids
+from ..cache import KVCache
+
 
 """
-Notes:
-It uses t5x.examples.t5.layers so that it is compatible with the t5 library. But t5x defines logical named axis
-and operates sharding in a different fashion than the flax official way of using `nn.with_logical_partitioning`...
-Although I hate doing this I am mixing both ways. 
-Putting this note out there to say that it's not my fault for this code. For any serious use, this needs a lot 
-of refactoring. I have already cleaned up some mess from the insane Hugging Face `modeling_mistral.py` and
-hopefully things are not too difficult from here.
-"""
-
-
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 @jax.jit
 def _get_unpad_data(padding_mask):
@@ -74,6 +64,7 @@ def _get_unpad_data(padding_mask):
         cu_seqlens,
         max_seqlen_in_batch,
     )
+"""
 
 
 @partial(
@@ -81,14 +72,16 @@ def _get_unpad_data(padding_mask):
     static_argnames=(
         "input_ids_shape",
         "dtype",
-        "past_key_values_length",
+        #"past_key_values_length",
+        "src_len",
         "sliding_window",
     ),
 )
 def _make_sliding_window_causal_mask(
     input_ids_shape: tuple,
     dtype: jnp.dtype,
-    past_key_values_length: int = 0,
+    #past_key_values_length: int = 0,
+    src_len: int,
     sliding_window: int = 4096,
 ):
     """
@@ -96,12 +89,14 @@ def _make_sliding_window_causal_mask(
     """
     bsz, tgt_len = input_ids_shape
 
+    """
     if tgt_len == 1 and past_key_values_length > 0:
         # we are likely at inferencing stage and the causal mask can be fast-tracked
-        pad_len = tgt_len + past_key_values_length - sliding_window - 1
+        pad_len = src_len - sliding_window - 1
         return jnp.log(
-            jnp.triu(jnp.ones((1, tgt_len + past_key_values_length)), k=pad_len)
+            jnp.triu(jnp.ones((1, src_len)), k=pad_len)
         )
+    """
 
     tensor = jnp.ones(
         (tgt_len, tgt_len),
@@ -111,12 +106,12 @@ def _make_sliding_window_causal_mask(
     mask = jnp.triu(mask, k=-sliding_window)
     mask = jnp.log(mask).astype(dtype)
 
-    if past_key_values_length > 0:
-        mask = jnp.concatenate(
-            [jnp.zeros((tgt_len, past_key_values_length), dtype=dtype), mask], axis=-1
-        )
+    #if src_len - tgt_len > 0:
+    mask = jnp.concatenate(
+        [jnp.zeros((tgt_len, src_len - tgt_len), dtype=dtype), mask], axis=-1
+    )
     return jnp.broadcast_to(
-        mask[None, None, :, :], (bsz, 1, tgt_len, tgt_len + past_key_values_length)
+        mask[None, None, :, :], (bsz, 1, tgt_len, src_len)
     )
 
 
@@ -204,6 +199,8 @@ class MistralMLP(nn.Module):
 
 
 class MistralAttention(Attention):
+    config: Any
+
     def setup(self):
         if self.config is None:
             raise ValueError("Must provide a config for attention.")
@@ -216,7 +213,11 @@ class MistralAttention(Attention):
         self.max_position_embeddings = self.config.max_position_embeddings
         self.rope_theta = self.config.rope_theta
         if self.fused_qkv:
-            assert self.num_heads == self.num_key_value_heads
+            if self.num_heads != self.num_key_value_heads:
+                raise ValueError(
+                        f"If fusing qkv, num of heads must be the same as num of kv heads. "
+                        f"Got {self.num_heads=} and {self.num_key_value_heads=}"
+                )
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -234,19 +235,18 @@ class MistralAttention(Attention):
 
     def __call__(
         self,
-        hidden_states,
-        attention_mask=None,
-        position_ids=None,
-        past_key_value=None,
-        output_attentions=False,
-        use_cache=False,
-        padding_mask=None,
-        training=False,
+        hidden_states: Array,
+        attention_mask: Optional[Array] = None,
+        position_ids: Optional[Array] = None,
+        kv_cache: Optional[Array] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        training: bool = False,
     ) -> tuple[jnp.ndarray, Optional[jnp.ndarray], Optional[tuple]]:
-        assert (
-            hidden_states.shape[-1] == self.hidden_size
-        ), f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}"
-        bsz, q_len = hidden_states.shape[-3:-1]  # bsz, q_len, hidden_size
+        if hidden_states.shape[-1] != self.hidden_size:
+            raise ValueError(f"Input to Attention layer has different dimension than the hidden dimension. Got {hidden_states.shape[-1]}")
+
+        bsz, q_len, _ = hidden_states.shape  # bsz, q_len, hidden_size
 
         # Obtain q, k, v from the current hidden state and shard q only (k, v will be handled later)
         query_states, key_states, value_states = self.qkv_proj(
@@ -254,7 +254,7 @@ class MistralAttention(Attention):
         )  # bsz, seq, n_head, head_dim
 
         past_kv_length = (
-            past_key_value[0].shape[-3] if past_key_value is not None else 0
+            kv_cache.end_pos if kv_cache is not None else 0
         )
         kv_seq_len = key_states.shape[-3] + past_kv_length
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
@@ -263,18 +263,9 @@ class MistralAttention(Attention):
             query_states, key_states, cos, sin, position_ids[:, past_kv_length:]
         )
         # attach kv-cache to k and v if exists, and shard k, v accordingly
-        if past_key_value is not None:
-            assert (
-                len(past_key_value) == 2
-            ), "past_key_value should be a tuple of (k, v)"
-            past_key, past_value = past_key_value
-            key_states = jnp.concatenate([past_key, key_states], axis=1)
-            value_states = jnp.concatenate([past_value, value_states], axis=1)
-
-        if use_cache:
-            past_key_value = (key_states, value_states)
-        else:
-            past_key_value = None
+        if kv_cache is not None:
+            kv_cache = kv_cache.update(key_states, value_states)
+            key_states, value_states = kv_cache.get_kv()
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -283,7 +274,6 @@ class MistralAttention(Attention):
         attn_weights = jnp.einsum(
             "bshn,bthn->bhst", query_states, key_states
         ) / jnp.sqrt(self.head_dim)
-
         check_shape(attn_weights, bsz, self.num_heads, q_len, kv_seq_len)
 
         if attention_mask is not None:
@@ -304,7 +294,7 @@ class MistralAttention(Attention):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, kv_cache
 
 
 class MistralDecoderLayer(nn.Module):
@@ -332,34 +322,31 @@ class MistralDecoderLayer(nn.Module):
         hidden_states: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
-        past_key_value: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
+        kv_cache: Optional[KVCache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        padding_mask: Optional[jnp.ndarray] = None,
-    ) -> Tuple:
+    ) -> Tuple[Array, Optional[Array], Optional[KVCache]]:
         """
         Args:
             hidden_states: input tensor
             attention_mask: mask for attention layer
             position_ids: position ids for positional embeddings
-            past_key_value: cached key and value projection states
+            kv_cache: kv cache
             output_attentions: whether to output attention weights
             use_cache: whether to use cached key and value projection states
-            padding_mask: mask for padding
         """
 
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, kv_cache = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
+            kv_cache=kv_cache,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            padding_mask=padding_mask,
         )
         hidden_states = residual + hidden_states
 
@@ -369,15 +356,7 @@ class MistralDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        if use_cache:
-            outputs += (present_key_value,)
-
-        return outputs
+        return hidden_states, self_attn_weights if output_attentions else None, kv_cache
 
 
 class MistralModel(nn.Module):
@@ -410,7 +389,7 @@ class MistralModel(nn.Module):
         attention_mask,
         input_shape,
         inputs_embeds,
-        past_key_values_length,
+        #past_key_values_length,
         sliding_window,
     ):
         # create causal mask
@@ -418,7 +397,8 @@ class MistralModel(nn.Module):
         combined_attention_mask = _make_sliding_window_causal_mask(
             input_shape,
             inputs_embeds.dtype,
-            past_key_values_length=past_key_values_length,
+            #past_key_values_length=past_key_values_length,
+            src_len=attention_mask.shape[1],
             sliding_window=sliding_window,
         )
 
@@ -429,16 +409,31 @@ class MistralModel(nn.Module):
 
         return expanded_attn_mask + combined_attention_mask
 
+    @staticmethod
+    def _prepare_inference_attention_mask(
+        attention_mask,
+        input_shape,
+        inputs_embeds,
+        sliding_window,
+    ):
+        """Create causal mask during inference.
+        It will assume the query len being 1 and jit compiled to return fixed-length masks.
+        Has to use a different kernel as _prepare_decoder_attention_mask is variable shape.
+        """
+        src_len = attention_mask.shape[1]
+        combined_mask = attention_mask & (jnp.arange(src_len) >= src_len - sliding_window)
+        return _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=1)
+
     def __call__(
         self,
         input_ids,
         attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
-        past_key_values: Optional[List[jnp.ndarray]] = None,
+        kv_caches: Optional[List[KVCache]] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-    ) -> BaseModelOutputWithPast:
+    ) -> BaseModelOutputWithCache:
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -453,86 +448,75 @@ class MistralModel(nn.Module):
 
         batch_size, seq_length = input_ids.shape
 
-        past_key_values_length = (
-            0 if past_key_values is None else past_key_values[0][0].shape[1]
-        )
+        #past_key_values_length = (
+        #    0 if kv_caches is None else kv_caches[0].end_pos
+        #)
 
-        padding_mask = None
-
-        # embed positions
         if attention_mask is None:
-            attention_mask = jnp.ones(
-                (batch_size, seq_length + past_key_values_length), dtype=bool
-            )
-        else:
-            padding_mask = attention_mask
+            if kv_caches is not None:
+                attention_mask = kv_caches[0].get_kv_mask(advance_right=input_ids.shape[1])
+            else:
+                attention_mask = jnp.ones(
+                    (batch_size, seq_length), dtype=bool
+                )
 
         if position_ids is None:
-            position_ids = (
-                jnp.arange(
-                    seq_length + past_key_values_length,
-                    dtype=jnp.int32,
-                )[None]
-                - (~attention_mask[0, :-seq_length]).sum()
-            )
-            position_ids = jnp.where(position_ids >= 0, position_ids, 0)
+            if kv_caches is not None:
+                position_ids = kv_caches[0].get_pos_ids(advance_right=input_ids.shape[1])
+            else:
+                position_ids = get_default_pos_ids((batch_size, seq_length), mask=attention_mask)
 
         inputs_embeds = self.embed_tokens(input_ids).astype(self.dtype)
-        attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask,
-            (batch_size, seq_length),
-            inputs_embeds,
-            past_key_values_length,
-            sliding_window=self.config.sliding_window,
-        )
+        if seq_length == 1:
+            attention_mask = self._prepare_inference_attention_mask(
+                attention_mask,
+                (batch_size, seq_length),
+                inputs_embeds,
+                sliding_window=self.config.sliding_window,
+            )
+        else:
+            attention_mask = self._prepare_decoder_attention_mask(
+                attention_mask,
+                (batch_size, seq_length),
+                inputs_embeds,
+                #past_key_values_length,
+                sliding_window=self.config.sliding_window,
+            )
 
         hidden_states = with_sharding_constraint(
             inputs_embeds, ("batch", "length", "embed")
         )
 
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = () if use_cache else None
+        all_hidden_states = []
+        all_self_attns = []
+        next_kv_caches = []
 
         for idx, decoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+            all_hidden_states.append(hidden_states)
 
-            past_key_value = (
-                past_key_values[idx] if past_key_values is not None else None
-            )
+            kv_cache = None if kv_caches is None else kv_caches[idx]
 
-            layer_outputs = decoder_layer(
+            hidden_states, self_attn_weights, kv_cache  = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_value,
+                kv_cache=kv_cache,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
-                padding_mask=padding_mask,
             )
 
-            hidden_states = layer_outputs[0]
+            all_self_attns.append(self_attn_weights)
+            next_kv_caches.append(kv_cache)
 
-            if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
-
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
+        all_hidden_states.append(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        next_cache = next_decoder_cache if use_cache else None
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithCache(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+            kv_caches=tuple(next_kv_caches) if use_cache else None,
+            hidden_states=tuple(all_hidden_states) if output_hidden_states else None,
+            attentions=tuple(all_self_attns) if output_attentions else None,
         )
 
 
@@ -540,7 +524,6 @@ class MistralForCausalLM(nn.Module):
     config: Any = None
     dtype: Any = jnp.float32
     kernel_init: Any = nn.initializers.xavier_uniform
-
     sharded: Optional[bool] = len(jax.devices()) > 1 and len(jax.devices()) % 2 == 0
 
     @staticmethod
@@ -591,6 +574,12 @@ class MistralForCausalLM(nn.Module):
                 y,
             )
         return (jax.device_put(x, y),)
+
+    def init_cache(self, batch_size: int, max_len: int, mask: Optional[Array] = None) -> list[KVCache]:
+        num_head = self.config.num_key_value_heads
+        head_dim = self.config.hidden_size // self.config.num_attention_heads
+        num_layers = self.config.num_hidden_layers
+        return [KVCache.init((batch_size, max_len, num_head, head_dim), mask=mask, left_buffer=max_len) for _ in range(num_layers)]
 
     def get_params(self, device_mesh_layout=(1, None), weights=None):
         """
@@ -702,24 +691,24 @@ class MistralForCausalLM(nn.Module):
         input_ids,
         attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
-        past_key_values: Optional[List[jnp.ndarray]] = None,
+        kv_caches: Optional[List[KVCache]] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-    ) -> CausalLMOutputWithPast:
+    ) -> CausalLMOutputWithCache:
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            kv_caches=kv_caches,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
         logits = self.lm_head(outputs.last_hidden_state)
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithCache(
             logits=logits,
-            past_key_values=outputs.past_key_values,
+            kv_caches=outputs.kv_caches,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
@@ -728,62 +717,34 @@ class MistralForCausalLM(nn.Module):
         self,
         params,
         tok,
-        past_key_values=None,
+        kv_caches=None,
         use_cache=True,
-        unpadded_past_kv_length=None,
-    ) -> tuple[CausalLMOutputWithPast, dict]:
+    ) -> tuple[CausalLMOutputWithCache, dict]:
         tok = jnp.array(tok)
-        if unpadded_past_kv_length is not None:
-            assert past_key_values is not None
-            assert tok.shape[1] == 1, (
-                f"When kv cache padding is enabled, only support when query seq = 1. "
-                f"Got {tok.shape[1]} instead."
-            )
-            past_kv_length = past_key_values[0][0].shape[1]
+        position_ids, attention_mask = None, None
 
-            position_ids = jnp.arange(past_kv_length + 1) - (
-                past_kv_length - unpadded_past_kv_length
-            )
-            attention_mask = jnp.repeat(
-                (position_ids >= 0)[None], repeats=tok.shape[0], axis=0
-            )
-            position_ids = jnp.repeat(
-                jnp.where(position_ids >= 0, position_ids, 0)[None],
-                repeats=tok.shape[0],
-                axis=0,
-            )
-        else:
-            position_ids, attention_mask = None, None
-
-        out = self.apply(
+        out, _ = self.apply(
             params,
             tok,
             position_ids=position_ids,
             attention_mask=attention_mask,
             mutable=("cache",),
-            output_hidden_states=False,
-            past_key_values=past_key_values,
+            #output_hidden_states=False, # maybe allow for toggling of hidden states in the future
+            #output_attentions=False, # maybe allow for toggling of attn wts in the future
+            kv_caches=kv_caches,
             use_cache=use_cache,
-        )[
-            0
-        ]  # return a tuple (CausalLMOutputWithPast, dict) where dict is the mutable cache
-        if (
-            unpadded_past_kv_length is not None
-        ):  # padding is applied: truncate the past kv back to same length
-            past_key_values = jax.tree_util.tree_map(
-                lambda x: x[:, tok.shape[1] :], out.past_key_values
-            )
-        else:
-            past_key_values = out.past_key_values
-        return out.logits, past_key_values
+        )  # return a tuple (CausalLMOutputWithCache, dict) where dict is the mutable cache
+
+        return out.logits, out.kv_caches
 
     def generate(
         self,
         params,
-        prompt_tokens: list | jnp.ndarray,
+        prompt_tokens: Array,
+        attention_mask: Optional[Array] = None,
         do_sample: bool = True,
         seed: int = 0,
-        max_length: int = 10,
+        max_tokens: int = 10,
         top_k: int = 0,
         top_p: float = 0.0,
         temp: float = 1.0,
@@ -794,13 +755,20 @@ class MistralForCausalLM(nn.Module):
         else:
             apply = jax.jit(self.wrapped_apply_fn, static_argnames=("use_cache",))
 
+        kv_caches = self.init_cache(
+                batch_size=prompt_tokens.shape[0], 
+                max_len=prompt_tokens.shape[1] + max_tokens,
+                mask=attention_mask,
+        )
+
         return generate(
             params,
             apply,
             prompt_tokens,
+            kv_caches,
             do_sample=do_sample,
             seed=seed,
-            max_len=max_length,
+            max_tokens=max_tokens,
             top_k=top_k,
             top_p=top_p,
             temp=temp,

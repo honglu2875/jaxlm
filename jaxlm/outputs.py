@@ -20,18 +20,19 @@ import flax
 import flax.linen as nn
 import jax.numpy as jnp
 
+from .cache import KVCache
 
 @flax.struct.dataclass
-class BaseModelOutputWithPast:
+class BaseModelOutputWithCache:
     last_hidden_state: jnp.ndarray
-    past_key_values: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    kv_caches: Optional[List[KVCache]] = None
     hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
     attentions: Optional[Tuple[jnp.ndarray, ...]] = None
 
 
 @flax.struct.dataclass
-class CausalLMOutputWithPast:
+class CausalLMOutputWithCache:
     logits: jnp.ndarray
-    past_key_values: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    kv_caches: Optional[List[KVCache]] = None
     hidden_states: Optional[Tuple[jnp.ndarray, ...]] = None
     attentions: Optional[Tuple[jnp.ndarray, ...]] = None

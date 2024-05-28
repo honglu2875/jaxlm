@@ -108,32 +108,32 @@ def test_generate():
         assert jax.numpy.allclose(outputs.logits.numpy(), outputs_jax[0].logits, atol=1e-5)
 
     # make sure do_sample works and compare to a naive high-latency implementation
-    def eval_fn(params, tok, past_key_values=None, use_cache=True) -> tuple:
+    def eval_fn(params, tok, kv_caches=None, use_cache=True) -> tuple:
         out = model_jax.apply(
             params,
             jnp.array(tok),
             mutable=("cache",),
             output_hidden_states=False,
             attention_mask=None,
-            past_key_values=past_key_values,
+            kv_caches=kv_caches,
             use_cache=use_cache,
         )[0]
-        return out.logits, out.past_key_values
+        return out.logits, out.kv_caches
 
     out_jax = model_jax.generate(
-        params, inputs_jax["input_ids"], do_sample=True, max_length=20
+        params, inputs_jax["input_ids"], do_sample=True, max_tokens=20
     )
-    naive_out = naive_generate(params, eval_fn, inputs_jax["input_ids"], do_sample=True, max_len=20,)
+    naive_out = naive_generate(params, eval_fn, inputs_jax["input_ids"], do_sample=True, max_tokens=20,)
     assert jnp.all(out_jax == naive_out)
     
     # compare do_sample=False with reference impl
     with torch.no_grad():
         out = model.generate(inputs["input_ids"], do_sample=False, max_new_tokens=10)
     out_jax = model_jax.generate(
-        params, inputs_jax["input_ids"], do_sample=False, max_length=10
+        params, inputs_jax["input_ids"], do_sample=False, max_tokens=10
     )
     #out_jax = naive_generate(params, eval_fn, inputs_jax["input_ids"], do_sample=False, max_len=10)
-    outout_jax = naive_generate(params, eval_fn, out_jax[:, :9], do_sample=False, max_len=8)
+    outout_jax = naive_generate(params, eval_fn, out_jax[:, :9], do_sample=False, max_tokens=8)
     #print(out, out_jax)
     #print(outout_jax)
 

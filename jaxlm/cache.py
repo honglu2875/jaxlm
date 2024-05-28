@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax import struct
 from .types import Array, DType, Shape
+from .utils import get_default_pos_ids
 
 
 class KVCache(struct.PyTreeNode):
@@ -25,91 +27,74 @@ class KVCache(struct.PyTreeNode):
     k: Array = struct.field(pytree_node=True)
     v: Array = struct.field(pytree_node=True)
     mask: Array = struct.field(pytree_node=True)
-    dtype: DType = jnp.float32
+    pos_ids: Array = struct.field(pytree_node=True)
+    dtype: DType = struct.field(pytree_node=False, default=jnp.float32)
     # kv cache is sometimes padded. end_pos indicate its ending position.
-    end_pos: Array | int = -1
-    # the number of axis that corresponds to the sequence direction.
-    seq_axis: int = 1
-    # kv cache may also have padding to the left, and one can apply a mask.
+    end_pos: int = struct.field(pytree_node=True, default=-1)
+    offset: int = struct.field(pytree_node=False, default=0)
 
-    def __post_init__(self):
-        if isinstance(self.end_pos, jnp.ndarray) and self.end_pos.ndim != 1:
-            raise ValueError(f"end_pos must be 1-dimensional. Got {self.end_pos.shape}.")
-        if not (0 <= self.seq_axis < self.k.ndim):
-            raise ValueError(f"seq_axis must be between 0 and {self.k.ndim}. Got {self.seq_axis}.")
-        
-
-    def _get_array(self, *args, start: int = 0, seq_axis: int = 1):
-        if self.end_pos == -1 and start == 0:
-            return args
-
+    def _get_array(self, *args, full_len: Optional[int] = None, advance_right: int = 0):
+        full_len = full_len or self.offset
+        start_idx = self.end_pos + self.offset - full_len + advance_right
         return tuple(map(
-            lambda x: x.take(indices=jnp.arange(start, self.end_pos + 1), axis=seq_axis), 
+            #lambda x: x[:, self.end_pos + start_idx : start_idx + full_len + advance_right], 
+            lambda x: jax.lax.dynamic_slice(x, (0, start_idx) + (0,) * (len(x.shape) - 2), (x.shape[0], full_len) + x.shape[2:]),
             args, 
         ))
 
-    def get_kv(self, start: int = 0):
-        return self._get_array(self.k, self.v, start=start, seq_axis=self.seq_axis)
+    def get_kv(self, full_len: Optional[int] = None):
+        return self._get_array(self.k, self.v, full_len=full_len)
         
+    def get_kv_mask(self, full_len: Optional[int] = None, advance_right: int = 0):
+        return self._get_array(self.mask, full_len=full_len, advance_right=advance_right)[0]
 
-    def get_kv_mask(self, start: int = 0):
-        return self._get_array(self.mask, start=start, seq_axis=self.seq_axis)
-
-    def _check_shape(self, arr: Array, shape: Shape, name: str):
-        if not len(shape) == len(arr.shape):
-            raise ValueError(f"Unexpected shape {name=}{arr.shape}. Must have {len(shape)} axis.")
-        if not all(s >= t for s, t in zip(shape, arr.shape)):
-            raise ValueError(f"The given shape must be larger than {name} shapes. Got {shape} and {arr.shape}.")
+    def get_pos_ids(self, full_len: Optional[int] = None, advance_right: int = 0):
+        return self._get_array(self.pos_ids, full_len=full_len, advance_right=advance_right)[0]
 
     @classmethod
-    def init(cls, *shape, k: Array | None = None, v: Array | None = None, mask: Array | None = None, dtype: DType = jnp.float32, seq_axis: int = 1):
-        if len(shape) == 1 and isinstance(shape[0], tuple):
-            shape = shape[0]
-
-        if k is not None and v is not None:
-            self._check_shape(k, shape)
-            self._check_shape(v, shape)
-            
-            k, v = jnp.pad(k, tuple((0, s - t) for s, t in zip(shape, k.shape)), constant_values=0), \
-                   jnp.pad(v, tuple((0, s - t) for s, t in zip(shape, v.shape)), constant_values=0)
-            end_pos = k.shape[seq_axis] - 1
-        elif k is None and v is None:
-            k, v = jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype)
+    def init(cls, shape: tuple, k: Optional[Array] = None, v: Optional[Array] = None, left_buffer: Optional[int] = None, mask: Optional[Array] = None, pos_ids: Optional[Array] = None, dtype: DType = jnp.float32):
+        extra_len = left_buffer if left_buffer is not None else shape[1]
+        full_shape = (shape[0], extra_len + shape[1]) + shape[2:]
+        if k is None and v is None:
+            k, v = jnp.zeros(full_shape, dtype=dtype), jnp.zeros(full_shape, dtype=dtype)
             end_pos = 0
         else:
-            raise ValueError(f"One of (k, v) is None and the other is not. Got {k=} and {v=}")
+            k, v = jnp.pad(k, ((0, 0), (extra_len, shape[1] - k.shape[1])) + ((0, 0)) * (len(shape) - 2), constant_values=0), \
+                   jnp.pad(k, ((0, 0), (extra_len, shape[1] - k.shape[1])) + ((0, 0)) * (len(shape) - 2), constant_values=0)
+            end_pos = k.shape[1]
 
         if mask is not None:
-            self._check_shape(mask, shape)
-            mask = jnp.pad(mask, tuple((0, s - t) for s, t in zip(shape, mask.shape)), constant_values=True, dtype=jnp.bool)
+            head = jnp.zeros((shape[0], extra_len), dtype=jnp.bool)
+            tail = jnp.ones((shape[0], shape[1] - mask.shape[1]), dtype=jnp.bool)
+            mask = jnp.concatenate((head, mask, tail), axis=1)
         else:
-            mask = jnp.ones(shape, dtype=jnp.bool)
+            mask = jnp.ones(full_shape[:2], dtype=jnp.bool)
 
-        return cls(k=k, v=v, dtype=dtype, end_pos=end_pos, seq_axis=seq_axis, mask=mask)
+        if pos_ids is None:
+            pos_ids = get_default_pos_ids(mask.shape, mask=mask)
 
-    def update(self, k: Array, v: Array, pos: Array | None = None):
+        return cls(k=k, v=v, dtype=dtype, end_pos=end_pos, mask=mask, pos_ids=pos_ids, offset=extra_len)
+
+    def update(self, k: Array, v: Array):
         """Inplace update of k, v cache (at the mercy of JIT compiler).
         (Note: please jit-compile in order to have a chance of performing inplace update.)
         Arguments:
             k: the current k vectors (shape 1 at the sequence axis)
             v: the current v vectors (shape 1 at the sequence axis)
-            pos: a 1-dim array specifying the index on sequence axis to update.
         """
-        if pos is None:
-            # If not provided with the update index, increment the recorded position.
-            next_pos = self.end_pos + 1
-            pos = self.end_pos
-            if isinstance(pos, int):
-                # Preserve the dimension
-                index = tuple([slice(None)] * self.seq_axis + [jnp.array([pos])])
-            else:
-                index = tuple([slice(None)] * self.seq_axis + [pos])
-        else:
-            # If provided with the update index, use it.
-            next_pos = pos + 1
-            index = tuple([slice(None)] * self.seq_axis + [pos])
-
-
+        next_pos = self.end_pos + k.shape[1]
+        index = (slice(None), jnp.arange(k.shape[1]) + self.end_pos + self.offset)
 
         return self.replace(k=self.k.at[index].set(k), v=self.v.at[index].set(v), end_pos=next_pos)
 
+    """
+    def extend_to(self, extend_len: int) -> "KVCache":
+        bs, seq_len = self.k.shape[:2]
+        extra_len = extend_len - seq_len
+        pad = jnp.zeros((bs, extra_len), dtype=self.k.dtype)
+        k, v = map(lambda x: jnp.concatenate((x, pad), axis=1), (self.k, self.v))
+        mask = jnp.concatenate((self.mask, jnp.ones((bs, extra_len), jnp.bool)), axis=1)
+        extra_pos = self.pos_ids[:, -1:] + jnp.arange(extra_len)[None] + 1
+        pos_ids = jnp.concatenate((self.pos_ids, extra_pos), axis=1)
+        return self.replace(k=k, v=v, mask=mask, pos_ids=pos_ids)
+    """
